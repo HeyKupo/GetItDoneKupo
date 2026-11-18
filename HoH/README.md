@@ -6,7 +6,7 @@ Each run, the script:
 1. Talks to Kyusei, picks your save, and enters.
 2. Uses a Pomander of Intuition.
 3. If there's no hoard, leaves right away. An empty floor takes about 12 seconds.
-4. If there is a hoard, uses your Protection item and runs to it. On the way it uses your job's dash, Sprint, and Safety or Concealment if you've turned them on. Then it opens the hoard and leaves.
+4. If there is a hoard, uses your Protection item and Safety (if on), then runs to it. On the way it uses your job's dash, then Concealment if that's your Protection, then Sprint. Concealment goes before Sprint so its animation doesn't use up Sprint's time. Then it opens the hoard and leaves.
 
 Leaving the duty doesn't save your progress. You go back in with the same save and the same pomanders every time, but each hoard you open still counts toward the achievements. In testing, about 47% of floors had a hoard.
 
@@ -14,7 +14,7 @@ Leaving the duty doesn't save your progress. You go back in with the same save a
 
 - [SomethingNeedDoing](https://github.com/Jaksuhn/SomethingNeedDoing) (v15 or later)
 - [vnavmesh](https://github.com/awgil/ffxiv_navmesh)
-- An English game client. The script relies on English names for the NPC, the pomanders, the actions, and chat messages.
+- Any game client language. The script looks everything up by ID and reads text from the game's own data, so it should work in any language, but it has only been tested on an English client.
 - A Heaven-on-High save at floor 11 that has a Pomander of Intuition and your Protection item. See [Making a save](#making-a-save).
 - To be on the **same job** that made the save. Deep dungeon saves are tied to the job.
 
@@ -25,7 +25,7 @@ Leaving the duty doesn't save your progress. You go back in with the same save a
 3. **Open every chest on the way** to collect what you need. You only need one of each item, because leaving puts them back:
    - a Pomander of Intuition
    - your Protection: Inferno, Crag or Vortex magicite, or a Pomander of Concealment or Petrification
-   - a Pomander of Safety (optional)
+   - a Pomander of Safety (recommended: it clears the floor's traps, so you don't lose time being turned into an otter or toad on the way)
 
    If you're short, use your Pomanders of Affluence and Fortune to get more chests.
 
@@ -56,21 +56,25 @@ To stop, stop the macro in SND.
 | ScriptPath | *(empty)* | Leave this empty. It's only for testing a local copy of `hoh_hoard.lua`: put the copy's full path here. |
 | SaveSlot | 1 | Which save file to enter with: 1 or 2. |
 | Runs | 30000 | How many times to enter. |
-| Protection | Inferno magicite | What to use once a hoard is found. The options are Inferno, Crag, or Vortex magicite, Concealment, Petrification, or None. |
-| Safety | off | Uses a Pomander of Safety on the way to the hoard, to remove traps. |
+| Protection | Inferno magicite | What to use once a hoard is found. The options are Inferno, Crag, or Vortex magicite, Concealment, Petrification, or None. Petrification is **not recommended**: see below. |
+| Safety | on | **Recommended.** Uses a Pomander of Safety on the way to the hoard. It removes the floor's traps, so you don't lose time being transformed. |
 | Dash | Auto (by job) | A forward dash to use on the way. Supported dashes: Smudge (PCT), Aetherial Shift (WHM), Hell's Ingress (RPR), and En Avant (DNC, both charges). Auto picks the one for your current job. |
+
+### Why Petrification isn't recommended
+
+Petrified enemies still count as being in a fight with you. That stops the game's normal way of leaving the duty from working, so after every hoard the script has to fall back to SND's leave. The server treats that leave like being kicked for inactivity, which isn't how a player normally leaves. Use magicite or Concealment instead.
 
 ### Notes on Concealment
 
 Concealment wears off when you use an ability or another pomander, but Sprint doesn't break it. With Concealment selected, the script:
 - uses Safety (if on) before setting off
-- dashes, then Sprints, then uses Concealment while running
+- dashes, then uses Concealment while running, then Sprints
 - skips dashes that would start or land within 20y of an enemy
 - skips Concealment if the hoard is less than 10y away
 
 ## How it finds the hoard
 
-Intuition shows a marker where the hoard is. However, the game only loads objects for nearby rooms, so sometimes the chat says a hoard is on the floor but no marker has loaded yet. When that happens, the script walks toward the farthest objects that have loaded until the marker shows up, for up to 45 seconds. In testing, this found the hoard about 94% of the time.
+Intuition shows a marker where the hoard is. However, the game only loads objects for nearby rooms, so sometimes the chat says a hoard is on the floor but no marker has loaded yet. When that happens, the script explores until the marker shows up, for up to 90 seconds. It first walks to the farthest loaded objects, such as coffers and beacons. If it runs out of those, it heads for the nearest part of the floor it hasn't been near yet. Before the second step and the longer time limit were added, exploring found the hoard 49 times out of 52.
 
 ## Logs
 
@@ -82,4 +86,4 @@ Open `/xllog` and filter on `[HoH]`.
 
 - Only Inferno magicite has been tested. Crag and Vortex are assumed to be the second and third magicite slots.
 - The check that stops a dash from landing in a wall hasn't been triggered in testing yet.
-- Leaving uses the game's normal leave, the same as Duty Finder → Leave. SND's own `LeaveCurrentContent()` makes the server treat it as an inactivity kick ("You were expelled from the duty due to extended inactivity"), so the script only uses it as a fallback.
+- Leaving uses the game's normal leave, the same as Duty Finder → Leave. SND's own `LeaveCurrentContent()` makes the server treat it as an inactivity kick ("You were expelled from the duty due to extended inactivity"), so the script only uses it as a fallback: when the normal leave doesn't work, as with Petrification.

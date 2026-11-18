@@ -1,7 +1,7 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.0.0
+version: 1.1.0
 description: HoH hoard farm, loaded by the HoH_hoard macro (which SND downloads it for as a dependency). Enter on a save, use Intuition, take the hoard if it's on the floor, leave, repeat. Leaving doesn't change the save.
 [[End Metadata]]
 --]=====]
@@ -14,10 +14,94 @@ function HoH_Main()
 local function LogI(msg) Dalamud.Log("[HoH] " .. msg) end
 local function LogD(msg) Dalamud.LogDebug("[HoH] " .. msg) end
 
+-- Intuition's result comes as a chat message. Its text is taken from the game's message table
+-- (LogMessage 7272 = hoard, 7273 = no hoard) in the client's language. Parts of a message that
+-- the game fills in at runtime come out as gaps, so match on the longest fixed piece.
+local function FixedPiece(text)
+    if text == nil then return nil end
+    local best = ""
+    for raw in string.gmatch(text .. "  ", "(.-)%s%s+") do
+        local piece = raw:gsub("^%s+", ""):gsub("%s+$", "")
+        if #piece > #best then best = piece end
+    end
+    return #best >= 6 and best or nil
+end
+local function LogMessageText(id)
+    local ok, v = pcall(function() return Excel.GetRow("LogMessage", id):GetProperty("Text") end)
+    return ok and v ~= nil and tostring(v) or nil
+end
+local SENSE_YES = FixedPiece(LogMessageText(7272)) or "You sense the Accursed Hoard calling you"
+local SENSE_NO  = FixedPiece(LogMessageText(7273)) or "You do not sense the call of the Accursed Hoard"
+LogD(string.format("Matching chat: hoard = \"%s\", no hoard = \"%s\"", SENSE_YES, SENSE_NO))
+
+-- Called by the macro's OnChatMessage (SND only hooks trigger functions written in the macro).
+function HoH_OnChat(msg)
+    if type(msg) ~= "string" then return end
+    if string.find(msg, SENSE_NO, 1, true) then HOH_SENSE = "no"
+    elseif string.find(msg, SENSE_YES, 1, true) then HOH_SENSE = "yes" end
+end
+
 -- ============================================================
 -- Config
 -- ============================================================
-local ENTRY_NPC_NAME   = "Kyusei"      -- HoH entrance NPC; start the script standing next to them
+local ENTRY_NPC_ID     = 1025846       -- Kyusei, the HoH entrance NPC; start the script standing next to them
+
+-- Everything is looked up by ID, and text comes from the game's own data (which is in the
+-- client's language), so the script works on any client language.
+local function GameText(sheet, id, field)
+    local ok, v = pcall(function()
+        local row = Excel.GetRow(sheet, id)
+        return row ~= nil and row:GetProperty(field) or nil
+    end)
+    if ok and v ~= nil then
+        local t = tostring(v)
+        if t ~= "" then return t end
+    end
+    return nil
+end
+local function ActionName(id, fallback) return GameText("Action", id, "Name") or fallback end
+local SPRINT_NAME = ActionName(3, "Sprint")
+local SPRINT_STATUS = 50
+
+-- true/false: do we have this status effect? nil if it can't be checked.
+local function HasStatus(id)
+    local found = false
+    local ok = pcall(function()
+        for st in luanet.each(Svc.Objects.LocalPlayer.StatusList) do
+            if st ~= nil and st.StatusId == id then found = true; break end
+        end
+    end)
+    collectgarbage("collect")
+    collectgarbage("collect")
+    if not ok then return nil end
+    return found
+end
+
+-- Names of our current status effects (for the Debug log).
+local function StatusNames()
+    local ids = {}
+    pcall(function()
+        for st in luanet.each(Svc.Objects.LocalPlayer.StatusList) do
+            if st ~= nil and st.StatusId ~= 0 then table.insert(ids, st.StatusId) end
+        end
+    end)
+    collectgarbage("collect")
+    collectgarbage("collect")
+    local names = {}
+    for _, id in ipairs(ids) do table.insert(names, (GameText("Status", id, "Name") or "?") .. " (" .. id .. ")") end
+    return #names > 0 and table.concat(names, ", ") or "none"
+end
+
+local function IsDead()
+    local dead = false
+    pcall(function()
+        local lp = Svc.Objects.LocalPlayer
+        dead = lp ~= nil and (lp.IsDead or lp.CurrentHp == 0)
+    end)
+    collectgarbage("collect")
+    collectgarbage("collect")
+    return dead
+end
 -- Settings come from the HoH_hoard macro's metadata block (editable in SND's macro settings).
 -- The numbers here are only fallbacks if a setting isn't declared there.
 local function CfgInt(name, fallback)
@@ -38,7 +122,7 @@ if SAVE_SLOT ~= 2 then SAVE_SLOT = 1 end
 local HOARD_MARKER_ID  = 0x1EA1F6      -- "BandedCofferIndicator": the spot Intuition reveals
 local HOARD_COFFER_ID  = 0x1EA1F7      -- "BandedCoffer": the hoard once you're standing on it
 local POMANDER_LOCK_SECONDS = 2.5      -- wait this long after Intuition before the next pomander/magicite
-local EXPLORE_SECONDS = 45              -- when the hoard is sensed but not loaded, explore this long before giving up
+local EXPLORE_SECONDS = 90              -- when the hoard is sensed but not loaded, explore this long before giving up
 local MARKER_AFTER_SENSE_SECONDS = 3   -- after the game says "hoard", wait this long for the marker
 local HOARD_DETECT_SECONDS = 5         -- after Intuition, look for the hoard marker this long (usually 0.5-2s; occasionally later)
 local HOARD_RETRY_SECONDS = 30         -- keep trying to open the hoard this long (e.g. waiting out an otter trap)
@@ -71,8 +155,15 @@ local function EnterWithSave(slot)
         error("Deep dungeon menu callbacks not filled in yet")
     end
 
-    local npc = Entity.GetEntityByName(ENTRY_NPC_NAME)
-    if npc == nil then error("Entry NPC not found: " .. ENTRY_NPC_NAME) end
+    -- Find Kyusei by ID, then use the name the game shows for her.
+    local npcName = nil
+    for obj in luanet.each(Svc.Objects) do
+        if obj ~= nil and obj.BaseId == ENTRY_NPC_ID then npcName = obj.Name.TextValue; break end
+    end
+    collectgarbage("collect")
+    collectgarbage("collect")
+    local npc = npcName and Entity.GetEntityByName(npcName) or nil
+    if npc == nil then error("Kyusei (Heaven-on-High entrance) not found nearby. Start next to her.") end
     npc:SetAsTarget()
     npc:Interact()
 
@@ -86,29 +177,9 @@ local function EnterWithSave(slot)
     yield("/click ContentsFinderConfirm Commence")
 end
 
--- DeepDungeonStatus callbacks: code 11 = use pomander, second value = pomander item ID
--- (DeepDungeonItem row; Intuition = 14). Tested in game 2026-11-17.
--- Pomander IDs, looked up by name in the game's DeepDungeonItem table (the callback takes the
--- row ID). Fallbacks are the IDs confirmed in game.
-local POM = { safety = 1, intuition = 14, concealment = nil, petrification = nil }
-do
-    local found = {}
-    for id = 1, 80 do
-        local ok, row = pcall(function() return Excel.GetRow("DeepDungeonItem", id) end)
-        if ok and row ~= nil then
-            local ok2, v = pcall(function() return row:GetProperty("Name") end)
-            local name = (ok2 and v ~= nil) and string.lower(tostring(v)) or ""
-            if string.find(name, "pomander of ", 1, true) and not string.find(name, "protomander", 1, true) then
-                for _, key in ipairs({ "safety", "intuition", "concealment", "petrification" }) do
-                    if found[key] == nil and string.find(name, key, 1, true) then found[key] = id end
-                end
-            end
-        end
-    end
-    for k, v in pairs(found) do POM[k] = v end
-    LogD(string.format("Pomander IDs: safety=%s intuition=%s concealment=%s petrification=%s",
-        tostring(POM.safety), tostring(POM.intuition), tostring(POM.concealment), tostring(POM.petrification)))
-end
+-- DeepDungeonStatus callbacks: code 11 = use pomander, second value = pomander ID
+-- (DeepDungeonItem row). All four confirmed in game.
+local POM = { safety = 1, intuition = 14, concealment = 18, petrification = 19 }
 
 local function PomCmd(id) return "/callback DeepDungeonStatus true 11 " .. id end
 
@@ -118,7 +189,7 @@ end
 
 -- What to use before running to the hoard (setting "Protection").
 -- Magicite: code 12 + magicite slot (Inferno 0 tested; Crag 1 / Vortex 2 assumed).
--- Pomanders: code 11 + pomander ID (looked up above).
+-- Pomanders: code 11 + pomander ID (above).
 local PROTECTION = {
     ["Inferno magicite"]          = { cmd = "/callback DeepDungeonStatus true 12 0", wait = 4 },
     ["Crag magicite"]             = { cmd = "/callback DeepDungeonStatus true 12 1", wait = 4 },
@@ -148,27 +219,30 @@ local function UseSafety()
     yield(PomCmd(POM.safety))
 end
 
+-- Protection, then Safety, both before we start moving. Concealment is the exception: it's
+-- cancelled by abilities and other pomanders (not Sprint), so it's only queued here and used
+-- on the move after any dashes (see SpeedUp).
+local function SafetyNow()
+    if USE_SAFETY and not SAFETY_USED and not STEALTH then
+        UseSafety()
+        yield("/wait 2.5")   -- pomander animation lock
+    end
+end
+
 local function UseProtection()
     local p = PROTECTION[PROTECTION_CHOICE]
     if p == nil then
         if PROTECTION_CHOICE ~= "None" then
             LogI("WARNING: Protection '" .. PROTECTION_CHOICE .. "' isn't available, running without it")
         end
-        return
-    end
-    if p.stealth then
-        -- Concealment is cancelled by abilities and other pomanders (not Sprint). So: Safety now,
-        -- then dash + Sprint on the move, then Concealment (see AfterSprint).
-        if USE_SAFETY and not SAFETY_USED then
-            UseSafety()
-            yield("/wait 2.5")   -- pomander animation lock
-        end
+    elseif p.stealth then
         PENDING_CONCEAL = p.cmd
-        return
+    else
+        LogD("Protection: " .. PROTECTION_CHOICE)
+        yield(p.cmd)
+        yield("/wait " .. p.wait)
     end
-    LogD("Protection: " .. PROTECTION_CHOICE)
-    yield(p.cmd)
-    yield("/wait " .. p.wait)
+    SafetyNow()
 end
 
 -- ============================================================
@@ -240,26 +314,50 @@ pcall(function()
     EventFramework = luanet.import_type("FFXIVClientStructs.FFXIV.Client.Game.Event.EventFramework")
 end)
 
-local NORMAL_LEAVE_OK = EventFramework ~= nil   -- turned off if it ever fails to take us out
 
+local RESULT_WAIT_SECONDS = 30   -- after dying, wait this long for the results screen
+local LEAVE_CHECK_SECONDS = 5    -- how long to wait for the normal leave before falling back
+
+local function WaitForResults()
+    -- Dying ends the run: the game shows the results screen, then we can leave as usual.
+    LogD("Dead: waiting for the results screen")
+    local t = 0
+    while Player.IsInDuty and not AddonReady("DeepDungeonResult") and t < RESULT_WAIT_SECONDS do
+        Wait(0.5); t = t + 0.5
+    end
+    LogD(string.format("Results screen %s after %.1fs", AddonReady("DeepDungeonResult") and "shown" or "not seen", t))
+    Wait(1)
+end
+
+-- Returns true if we died at any point while leaving.
 local function LeaveDuty()
-    if InstancedContent.CanLeaveCurrentContent() then
-        local sent = NORMAL_LEAVE_OK and pcall(function() EventFramework.LeaveCurrentContent(false) end)
+    local died = false
+    for attempt = 1, 2 do
+        if IsDead() then died = true; WaitForResults() end
+        if not Player.IsInDuty or not InstancedContent.CanLeaveCurrentContent() then break end
+        local sent = EventFramework ~= nil and pcall(function() EventFramework.LeaveCurrentContent(false) end)
         if sent then
-            -- make sure it actually started leaving; otherwise fall back for good
+            -- Wait for the leave to go through; stop early if we die meanwhile (then the
+            -- results screen comes first). If we were already dead, just wait.
+            local deadAtSend = IsDead()
             local t = 0
-            while Player.IsInDuty and t < 5 do Wait(0.25); t = t + 0.25 end
-            if Player.IsInDuty then
-                LogI("WARNING: normal leave didn't work, switching to SND's (forced) leave")
-                NORMAL_LEAVE_OK = false
-                sent = false
+            while Player.IsInDuty and (deadAtSend or not IsDead()) and t < LEAVE_CHECK_SECONDS do Wait(0.25); t = t + 0.25 end
+            if not Player.IsInDuty then break end
+            if IsDead() and not deadAtSend and attempt == 1 then
+                died = true
+                LogD("Died while leaving; trying again after the results screen")
+            else
+                LogI("WARNING: normal leave didn't work" .. (IsDead() and " (dead)" or "") .. ", using SND's (forced) leave this time")
+                InstancedContent.LeaveCurrentContent()
+                break
             end
-        end
-        if not sent then
+        else
             InstancedContent.LeaveCurrentContent()
+            break
         end
     end
     WaitUntil(function() return not Player.IsInDuty and Player.Available end, 60, "leaving duty")
+    return died
 end
 
 local function DistanceTo(pos)
@@ -284,6 +382,8 @@ local function ActionReady(id)
     if not ok or status == nil then return nil end
     return status == 0, status
 end
+for _, d in pairs(DASHES) do d.action = ActionName(d.id, d.action) end   -- client-language name for /ac
+
 local ENEMY_DASH_RADIUS = 20   -- with Concealment, skip dashes if a living enemy is this close
 local DASH_MARGIN = 2   -- only dash if the destination is at least range + this far, so we don't overshoot
 
@@ -376,9 +476,66 @@ local function LandingOnMesh(range)
     return dx * dx + dz * dz <= 1.5 * 1.5
 end
 
--- Dash (if the job has one, it's ready, the destination is far enough, and it won't land in a
--- wall), Sprint, then any extra dash charges. Call once movement has started.
-local function SpeedUp(target)
+-- Concealment (if chosen) goes on the move, after any dashes (they'd cancel it) and before
+-- Sprint (which doesn't), so the pomander animation doesn't eat into Sprint. `hoard` is where
+-- we're headed, if it's the hoard. Safety normally went before moving (UseProtection); it's
+-- only used here if that somehow didn't happen.
+local CONCEAL_MIN_DIST = 10   -- don't bother with Concealment if this close to the hoard
+local POM_ANIM_SECONDS = 1.5  -- most of the pomander animation lock (~2.1s); Sprint is retried after it
+
+local function PomOnTheMove(hoard)
+    if PENDING_CONCEAL ~= nil and hoard ~= nil and DistanceTo(hoard) < CONCEAL_MIN_DIST then
+        LogD(string.format("Concealment skipped: %.0fy left", DistanceTo(hoard)))
+        PENDING_CONCEAL = nil
+    elseif PENDING_CONCEAL ~= nil then
+        LogD("Protection: Pomander of Concealment (on the move)")
+        yield(PENDING_CONCEAL)
+        PENDING_CONCEAL = nil
+        STEALTH = true
+        Wait(POM_ANIM_SECONDS)
+        return true
+    elseif USE_SAFETY and not SAFETY_USED and not STEALTH then
+        UseSafety()
+        Wait(POM_ANIM_SECONDS)
+        return true
+    end
+    return false
+end
+
+-- Ask vnavmesh for a fresh path from where we are now. vnavmesh walks straight lines between
+-- the waypoints it planned, so after a dash (which goes the way we face, not along the path)
+-- the next straight line can run into a wall or a pillar. A new path from the landing spot
+-- avoids that.
+local function Repath(target, why)
+    LogD("New path: " .. why)
+    IPC.vnavmesh.PathfindAndMoveTo(target, false)
+    local t = 0
+    while IPC.vnavmesh.PathfindInProgress() and t < 10 do Wait(0.1); t = t + 0.1 end
+end
+
+-- Watches for being stuck on something while vnavmesh thinks we're moving: if we've moved
+-- less than half a yalm in 1.5s, plan a new path. Call the returned function every `dt` seconds.
+local function StuckWatcher(target)
+    local lastX, lastZ, still = nil, nil, 0
+    return function(dt)
+        local p = Entity.Player.Position
+        if lastX ~= nil and (p.X - lastX) ^ 2 + (p.Z - lastZ) ^ 2 < 0.25 then
+            still = still + dt
+        else
+            still = 0
+        end
+        lastX, lastZ = p.X, p.Z
+        if still >= 1.5 and IPC.vnavmesh.IsRunning() then
+            Repath(target, "stuck")
+            still = 0
+        end
+    end
+end
+
+-- On the way: dash (if the job has one, it's ready, the destination is far enough, and it won't
+-- land in a wall), any extra dash charges, the on-the-move pomander, then Sprint.
+-- Call once movement has started.
+local function SpeedUp(target, hoard)
     local d = CurrentDash()
     if STEALTH and d ~= nil then
         LogD("Concealed: no dash")
@@ -414,6 +571,8 @@ local function SpeedUp(target)
         yield('/ac "' .. d.action .. '"')
         lastDash[d.action] = Now() or true
         Wait(0.9)   -- dash animation lock (~0.8s); the next action is ignored if sent during it
+        Repath(target, "after " .. d.action)
+        Wait(0.2)   -- let the character turn onto the new path before anything else uses facing
         return "dashed"
     end
 
@@ -432,41 +591,34 @@ local function SpeedUp(target)
         end
     end
 
-    local dashed = false
-    if d ~= nil then
-        dashed = DashWithin(true, 1.0) == "dashed"
-    end
-
-    LogD("Sprint")
-    yield('/ac "Sprint"')   -- no wait after, so trying it while on cooldown costs nothing
-
-    -- Extra charges (En Avant): short lockout between charges, and the path may turn, so keep
-    -- trying for a bit.
-    if d ~= nil and dashed and d.uses > 1 then
-        Wait(0.7)   -- Sprint's animation lock
+    if d ~= nil and DashWithin(true, 1.0) == "dashed" then
+        -- Extra charges (En Avant): short lockout between charges, and the path may turn, so
+        -- keep trying for a bit.
         for i = 2, d.uses do
             if DashWithin(false, 2.5) ~= "dashed" then break end
         end
     end
-end
 
--- Pomander to use on the move, ~0.7s after Sprint (its animation lock): Concealment if pending,
--- otherwise Safety.
-local CONCEAL_MIN_DIST = 10   -- don't bother with Concealment if this close to where we're going
+    local usedPom = PomOnTheMove(hoard)
 
-local function AfterSprint(target)
-    if PENDING_CONCEAL ~= nil and target ~= nil and DistanceTo(target) < CONCEAL_MIN_DIST then
-        LogD(string.format("Concealment skipped: %.0fy left", DistanceTo(target)))
-        PENDING_CONCEAL = nil
-    elseif PENDING_CONCEAL ~= nil then
-        Wait(0.7)
-        LogD("Protection: Pomander of Concealment (on the move)")
-        yield(PENDING_CONCEAL)
-        PENDING_CONCEAL = nil
-        STEALTH = true
-    elseif USE_SAFETY and not SAFETY_USED and not STEALTH then
-        Wait(0.7)
-        UseSafety()
+    -- Sprint, retried until it's on (the end of a pomander animation can swallow it).
+    local t = 0
+    while true do
+        local on = HasStatus(SPRINT_STATUS)
+        if on then
+            if t > 0 then LogD(string.format("Sprint on after %.1fs", t)) end
+            break
+        end
+        -- Not on and not usable: on cooldown (only trust this when no pomander animation is
+        -- in the way, since that also makes it unusable for a moment).
+        if not usedPom and t == 0 and ActionReady(3) == false then
+            LogD("Sprint on cooldown")
+            break
+        end
+        LogD("Sprint")
+        yield('/ac "' .. SPRINT_NAME .. '"')
+        if on == nil or t >= 4 then break end   -- can't check, or Sprint is on cooldown
+        Wait(0.3); t = t + 0.3
     end
 end
 
@@ -475,62 +627,126 @@ local function MoveTo(pos)
     -- wait for the path to be computed and movement to begin, so we're facing along the path
     WaitUntil(function() return not IPC.vnavmesh.PathfindInProgress() end, 30, "pathfinding to hoard")
     Wait(0.4)
-    SpeedUp(pos)
-    AfterSprint(pos)
-    WaitUntil(function() return not IPC.vnavmesh.IsRunning() end, 120, "moving to hoard")
+    SpeedUp(pos, pos)
+    local stuck = StuckWatcher(pos)
+    local t = 0
+    while IPC.vnavmesh.IsRunning() and not IsDead() do
+        Wait(0.5); t = t + 0.5
+        stuck(0.5)
+        if t >= 120 then error("Timed out waiting for moving to hoard") end
+    end
 end
 
 -- The game says there's a hoard but its marker isn't loaded (objects load room by room around
--- you). Walk toward the farthest loaded object, checking for the marker as more rooms load;
--- repeat with the next unvisited object. Returns the marker, or nil if it never showed up.
+-- you), so walk around until it shows up. Targets, in order:
+--   1. the farthest loaded event object (coffer, beacon) we haven't been near; these mark rooms.
+--   2. once those run out, the nearest spot on the navmesh that's far from everywhere we've
+--      walked, i.e. the closest part of the floor we haven't seen yet.
+-- Returns the marker, or nil if it never showed up.
+local EXPLORE_GRID_STEP = 15     -- spacing of candidate spots on the navmesh
+local EXPLORE_GRID_RADIUS = 165  -- how far from the start to look for candidate spots
+local EXPLORE_SEEN_DIST = 30     -- a spot within this distance of our trail counts as seen
+
 local function Explore()
-    local visited = {}
-    local function Visited(pos)
-        for _, v in ipairs(visited) do
-            local dx, dz = pos.X - v.X, pos.Z - v.Z
-            if dx * dx + dz * dz < 64 then return true end   -- within 8y of a spot we've been to
+    local trail = {}     -- where we've been, as {X, Z}, at least 5y apart
+    local function AddTrail()
+        local p = Entity.Player.Position
+        local last = trail[#trail]
+        if last == nil or (p.X - last.X) ^ 2 + (p.Z - last.Z) ^ 2 > 25 then
+            table.insert(trail, { X = p.X, Z = p.Z })
+        end
+    end
+    local function NearTrail(x, z, dist)
+        for _, v in ipairs(trail) do
+            if (x - v.X) ^ 2 + (z - v.Z) ^ 2 < dist * dist then return true end
         end
         return false
+    end
+
+    -- Spots on the floor's navmesh around the start, built the first time we need them.
+    local spots = nil
+    local function MeshSpots()
+        if spots ~= nil then return spots end
+        spots = {}
+        if V3 == nil then return spots end
+        local p = Entity.Player.Position
+        local x0, y0, z0 = p.X, p.Y, p.Z
+        for dx = -EXPLORE_GRID_RADIUS, EXPLORE_GRID_RADIUS, EXPLORE_GRID_STEP do
+            for dz = -EXPLORE_GRID_RADIUS, EXPLORE_GRID_RADIUS, EXPLORE_GRID_STEP do
+                local x, z = x0 + dx, z0 + dz
+                local ok, pt = pcall(function() return IPC.vnavmesh.NearestPoint(V3(x, y0, z), 3, 10) end)
+                if ok and pt ~= nil then
+                    table.insert(spots, { X = pt.X, Y = pt.Y, Z = pt.Z, Tried = false })
+                end
+            end
+        end
+        LogD(string.format("Explore: %d navmesh spots to choose from", #spots))
+        return spots
+    end
+
+    local function NextTarget()
+        local me = Entity.Player.Position
+        -- 1. Farthest event object we haven't been near.
+        local best = nil
+        for _, o in ipairs(ListEventObjects()) do
+            if o.Dist > 8 and not NearTrail(o.Position.X, o.Position.Z, 8) and (best == nil or o.Dist > best.Dist) then
+                best = o
+            end
+        end
+        if best ~= nil then return best.Position, best.Name, best.Dist end
+        -- 2. Nearest navmesh spot we haven't seen.
+        local spot, spotDist = nil, nil
+        for _, sp in ipairs(MeshSpots()) do
+            if not sp.Tried and not NearTrail(sp.X, sp.Z, EXPLORE_SEEN_DIST) then
+                local d = math.sqrt((sp.X - me.X) ^ 2 + (sp.Z - me.Z) ^ 2)
+                if spot == nil or d < spotDist then spot, spotDist = sp, d end
+            end
+        end
+        if spot ~= nil then
+            spot.Tried = true
+            return V3(spot.X, spot.Y, spot.Z), "unexplored area", spotDist
+        end
+        return nil
     end
 
     local t = 0
     local legs = 0
     local first = true
+    AddTrail()
     while t < EXPLORE_SECONDS do
         local marker = FindObject(HOARD_MARKER_ID)
         if marker ~= nil then return marker end
 
-        local target = nil
-        for _, o in ipairs(ListEventObjects()) do
-            if o.Dist > 8 and not Visited(o.Position) and (target == nil or o.Dist > target.Dist) then
-                target = o
-            end
-        end
+        local target, name, dist = NextTarget()
         if target == nil then
             LogD("Explore: nothing left to walk to")
             return nil
         end
 
         legs = legs + 1
-        LogD(string.format("Explore leg %d: %s at %.0fy", legs, target.Name, target.Dist))
-        IPC.vnavmesh.PathfindAndMoveTo(target.Position, false)
+        LogD(string.format("Explore leg %d: %s at %.0fy", legs, name, dist))
+        IPC.vnavmesh.PathfindAndMoveTo(target, false)
         WaitUntil(function() return not IPC.vnavmesh.PathfindInProgress() end, 30, "pathfinding (explore)")
-        if first then
+        if first and IPC.vnavmesh.IsRunning() then
             first = false
             Wait(0.4)
-            SpeedUp(target.Position)
-            AfterSprint(nil)
+            SpeedUp(target, nil)
         end
 
+        local stuck = StuckWatcher(target)
         while IPC.vnavmesh.IsRunning() and t < EXPLORE_SECONDS do
             Wait(0.5); t = t + 0.5
+            if IsDead() then IPC.vnavmesh.Stop(); return nil end
+            stuck(0.5)
+            AddTrail()
             marker = FindObject(HOARD_MARKER_ID)
             if marker ~= nil then
                 IPC.vnavmesh.Stop()
                 return marker
             end
         end
-        table.insert(visited, target.Position)
+        -- Count the target itself as visited, even if there was no path to it.
+        table.insert(trail, { X = target.X, Z = target.Z })
         t = t + 0.5
     end
     IPC.vnavmesh.Stop()
@@ -554,8 +770,8 @@ local function Attempt()
     WaitAddon("DeepDungeonStatus", 15)
     Wait(0.5)
 
-    -- HOH_SENSE is set by OnChatMessage in the macro text from Intuition's chat result:
-    -- "yes" = "You sense the Accursed Hoard calling you...", "no" = "You do not sense the call...".
+    -- HOH_SENSE is set by HoH_OnChat (called from the macro's OnChatMessage) from Intuition's
+    -- chat result: "yes" = "You sense the Accursed Hoard calling you...", "no" = "You do not sense...".
     -- It arrives ~1s after Intuition; the marker ~0.3s after that. Without the watcher, fall back
     -- to waiting HOARD_DETECT_SECONDS for the marker.
     HOH_SENSE = nil
@@ -591,6 +807,10 @@ local function Attempt()
         LogD("Hoard sensed but marker not loaded yet, exploring")
         DumpNearbyObjects()
         marker = Explore()
+        if marker == nil and IsDead() then
+            LogI("Died while exploring")
+            return "died"
+        end
         if marker == nil then
             LogI("SENSED BUT NOT FOUND after exploring")
             return "unseen"
@@ -600,8 +820,13 @@ local function Attempt()
         LogD(string.format("Marker seen %.2fs after Intuition", t))
     end
     LogD("Hoard found")
+    if STEALTH then LogD("Status effects: " .. StatusNames()) end
 
     MoveTo(marker.Position)
+    if IsDead() then
+        LogI("Died on the way to the hoard")
+        return "died"
+    end
 
     -- Standing on the spot makes the coffer appear. Interact until it's gone (opened), retrying
     -- for a while in case we're transformed by a trap (otter etc.) and can't open it yet.
@@ -630,6 +855,10 @@ local function Attempt()
             LogD("Hoard taken")
             return "taken"
         end
+        if IsDead() then
+            LogI("Died before opening the hoard")
+            return "died"
+        end
         Wait(0.3); t = t + 0.3
     end
 
@@ -644,17 +873,20 @@ end
 -- ============================================================
 -- Main
 -- ============================================================
-local hoards, missed, unseen = 0, 0, 0
+local hoards, missed, unseen, deaths = 0, 0, 0, 0
 LogD("Landing check (vnavmesh): " .. (V3 ~= nil and "available" or "unavailable") .. ", normal leave: " .. (EventFramework ~= nil and "available" or "unavailable"))
 LogI(string.format("Starting: %d runs, save file %d", MAX_RUNS, SAVE_SLOT))
 for i = 1, MAX_RUNS do
     local result = Attempt()
     if result == "taken" then hoards = hoards + 1 elseif result == "missed" then missed = missed + 1 elseif result == "unseen" then unseen = unseen + 1 end
-    LeaveDuty()
-    LogI(string.format("Run %d done, hoards taken: %d, missed: %d, sensed-not-found: %d", i, hoards, missed, unseen))
+    if LeaveDuty() then
+        deaths = deaths + 1
+        if result == "taken" then LogI("Died after opening the hoard (it still counts)") end
+    end
+    LogI(string.format("Run %d done, hoards taken: %d, missed: %d, sensed-not-found: %d, deaths: %d", i, hoards, missed, unseen, deaths))
     Wait(3)
 end
-LogI(string.format("Finished %d runs: %d hoards taken, %d missed, %d sensed-not-found", MAX_RUNS, hoards, missed, unseen))
+LogI(string.format("Finished %d runs: %d hoards taken, %d missed, %d sensed-not-found, %d deaths", MAX_RUNS, hoards, missed, unseen, deaths))
 collectgarbage("collect")
 collectgarbage("collect")
 end

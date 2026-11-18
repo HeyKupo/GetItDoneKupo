@@ -1,12 +1,12 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.0.0
+version: 1.1.0
 description: Farms Accursed Hoards in Heaven-on-High. https://github.com/HeyKupo/GetItDoneKupo/tree/main/HoH
 plugin_dependencies:
 - vnavmesh
 dependencies:
-- source: https://github.com/HeyKupo/GetItDoneKupo/blob/v1.0.0/HoH/hoh_hoard.lua
+- source: https://github.com/HeyKupo/GetItDoneKupo/blob/v1.1.0/HoH/hoh_hoard.lua
 configs:
   ScriptPath:
     default: ""
@@ -33,8 +33,8 @@ configs:
       - "Pomander of Petrification"
       - "None"
   Safety:
-    default: false
-    description: Use a Pomander of Safety (removes traps) on the way to the hoard
+    default: true
+    description: (Recommended) Use a Pomander of Safety on the way to the hoard. Removes traps so you don't lose time transformed.
   Dash:
     description: Forward dash to use on the way to the hoard (only fires if your current job has it)
     is_choice: true
@@ -48,17 +48,12 @@ configs:
       - "None"
 [[End Metadata]]
 --]=====]
--- Intuition result watcher. SND only hooks trigger functions whose names appear in the macro
--- text itself, so it lives here; hoh_hoard.lua reads HOH_SENSE.
+-- Intuition result watcher. SND only hooks trigger functions written in the macro text itself,
+-- so this one lives here and hands each chat message to hoh_hoard.lua.
 HOH_SENSE = nil
 function OnChatMessage()
     local msg = TriggerData and TriggerData.message
-    if type(msg) ~= "string" then return end
-    if string.find(msg, "You do not sense the call of the Accursed Hoard", 1, true) then
-        HOH_SENSE = "no"
-    elseif string.find(msg, "You sense the Accursed Hoard calling you", 1, true) then
-        HOH_SENSE = "yes"
-    end
+    if HoH_OnChat ~= nil then HoH_OnChat(msg) end
 end
 
 -- hoh_hoard.lua is downloaded by SND (see dependencies above) and defines HoH_Main.
