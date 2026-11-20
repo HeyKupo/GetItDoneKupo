@@ -1,12 +1,12 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.1.0
+version: 1.2.0
 description: Farms Accursed Hoards in Heaven-on-High. https://github.com/HeyKupo/GetItDoneKupo/tree/main/HoH
 plugin_dependencies:
 - vnavmesh
 dependencies:
-- source: https://github.com/HeyKupo/GetItDoneKupo/blob/v1.1.0/HoH/hoh_hoard.lua
+- source: https://github.com/HeyKupo/GetItDoneKupo/blob/v1.2.0/HoH/hoh_hoard.lua
 configs:
   ScriptPath:
     default: ""
@@ -35,6 +35,9 @@ configs:
   Safety:
     default: true
     description: (Recommended) Use a Pomander of Safety on the way to the hoard. Removes traps so you don't lose time transformed.
+  RecordSpots:
+    default: false
+    description: Keep a list of where hoards were found (hoh_hoard_spots.csv and hoh_hoard_finds.csv in SND's config folder), for searching without Intuition later.
   Dash:
     description: Forward dash to use on the way to the hoard (only fires if your current job has it)
     is_choice: true
@@ -51,6 +54,7 @@ configs:
 -- Intuition result watcher. SND only hooks trigger functions written in the macro text itself,
 -- so this one lives here and hands each chat message to hoh_hoard.lua.
 HOH_SENSE = nil
+HOH_DISCOVERED = false
 function OnChatMessage()
     local msg = TriggerData and TriggerData.message
     if HoH_OnChat ~= nil then HoH_OnChat(msg) end

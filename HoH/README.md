@@ -6,9 +6,11 @@ Each run, the script:
 1. Talks to Kyusei, picks your save, and enters.
 2. Uses a Pomander of Intuition.
 3. If there's no hoard, leaves right away. An empty floor takes about 12 seconds.
-4. If there is a hoard, uses your Protection item and Safety (if on), then runs to it. On the way it uses your job's dash, then Concealment if that's your Protection, then Sprint. Concealment goes before Sprint so its animation doesn't use up Sprint's time. Then it opens the hoard and leaves.
+4. If there is a hoard, uses your Protection item and Safety (if on), then runs to it. On the way it uses your job's dash, then Concealment if that's your Protection, then Sprint. Concealment goes before Sprint so its animation doesn't use up Sprint's time. It stands on the spot until the hoard is discovered, then leaves.
 
-Leaving the duty doesn't save your progress. You go back in with the same save and the same pomanders every time, but each hoard you open still counts toward the achievements. In testing, about 47% of floors had a hoard.
+Leaving the duty doesn't save your progress. You go back in with the same save and the same pomanders every time, but each hoard you discover still counts toward the achievements. In testing, just under half of floors had a hoard (48% over 1,140 runs).
+
+The script doesn't open the hoard's coffer. The achievements count a hoard as soon as it's discovered, and hoard loot is only awarded when you clear the floor set's boss, so opening it would only cost time.
 
 ## Requirements
 
@@ -58,6 +60,7 @@ To stop, stop the macro in SND.
 | Runs | 30000 | How many times to enter. |
 | Protection | Inferno magicite | What to use once a hoard is found. The options are Inferno, Crag, or Vortex magicite, Concealment, Petrification, or None. Petrification is **not recommended**: see below. |
 | Safety | on | **Recommended.** Uses a Pomander of Safety on the way to the hoard. It removes the floor's traps, so you don't lose time being transformed. |
+| RecordSpots | off | Keeps a list of where hoards were found, for a planned mode that searches without Intuition. See [Files](#files). |
 | Dash | Auto (by job) | A forward dash to use on the way. Supported dashes: Smudge (PCT), Aetherial Shift (WHM), Hell's Ingress (RPR), and En Avant (DNC, both charges). Auto picks the one for your current job. |
 
 ### Why Petrification isn't recommended
@@ -76,10 +79,22 @@ Concealment wears off when you use an ability or another pomander, but Sprint do
 
 Intuition shows a marker where the hoard is. However, the game only loads objects for nearby rooms, so sometimes the chat says a hoard is on the floor but no marker has loaded yet. When that happens, the script explores until the marker shows up, for up to 90 seconds. It first walks to the farthest loaded objects, such as coffers and beacons. If it runs out of those, it heads for the nearest part of the floor it hasn't been near yet. Before the second step and the longer time limit were added, exploring found the hoard 49 times out of 52.
 
+## Files
+
+The script keeps a few small files in SND's config folder (`%APPDATA%\XIVLauncher\pluginConfigs\SomethingNeedDoing`). They're separate from the Dalamud log, so they survive log rotation.
+
+| File | When | What |
+| --- | --- | --- |
+| `hoh_hoard_runs.csv` | Always | Running totals per floor set: runs, floors with a hoard, discovered, missed, not found, deaths. The hoard rate shown at the start of each session comes from here. |
+| `hoh_hoard_spots.csv` | RecordSpots on | One line per hoard spot found, with how many times. |
+| `hoh_hoard_finds.csv` | RecordSpots on | One line per hoard found, with time and position. |
+
+Don't keep these open in Excel while the script runs: Excel locks the file and that run's update is skipped (the log shows a warning).
+
 ## Logs
 
 Open `/xllog` and filter on `[HoH]`.
-- At **Information** level you get one line per run, a summary at the end, and any warnings, such as a hoard that wasn't opened or a hoard that was sensed but never found.
+- At **Information** level you get the run tally (and the spot list summary, if RecordSpots is on) at the start and end, one line per run, and any warnings, such as a hoard that wasn't discovered or one that was sensed but never found.
 - At **Debug** level you get step-by-step details.
 
 ## Known limits

@@ -1,7 +1,7 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.1.0
+version: 1.2.0
 description: HoH hoard farm, loaded by the HoH_hoard macro (which SND downloads it for as a dependency). Enter on a save, use Intuition, take the hoard if it's on the floor, leave, repeat. Leaving doesn't change the save.
 [[End Metadata]]
 --]=====]
@@ -32,13 +32,16 @@ local function LogMessageText(id)
 end
 local SENSE_YES = FixedPiece(LogMessageText(7272)) or "You sense the Accursed Hoard calling you"
 local SENSE_NO  = FixedPiece(LogMessageText(7273)) or "You do not sense the call of the Accursed Hoard"
-LogD(string.format("Matching chat: hoard = \"%s\", no hoard = \"%s\"", SENSE_YES, SENSE_NO))
+local DISCOVERED = FixedPiece(LogMessageText(7274)) or "You discover a piece of the Accursed Hoard"
+LogD(string.format("Matching chat: hoard = \"%s\", no hoard = \"%s\", discovered = \"%s\"", SENSE_YES, SENSE_NO, DISCOVERED))
+HOH_DISCOVERED = false
 
 -- Called by the macro's OnChatMessage (SND only hooks trigger functions written in the macro).
 function HoH_OnChat(msg)
     if type(msg) ~= "string" then return end
     if string.find(msg, SENSE_NO, 1, true) then HOH_SENSE = "no"
-    elseif string.find(msg, SENSE_YES, 1, true) then HOH_SENSE = "yes" end
+    elseif string.find(msg, SENSE_YES, 1, true) then HOH_SENSE = "yes"
+    elseif string.find(msg, DISCOVERED, 1, true) then HOH_DISCOVERED = true end
 end
 
 -- ============================================================
@@ -125,7 +128,11 @@ local POMANDER_LOCK_SECONDS = 2.5      -- wait this long after Intuition before 
 local EXPLORE_SECONDS = 90              -- when the hoard is sensed but not loaded, explore this long before giving up
 local MARKER_AFTER_SENSE_SECONDS = 3   -- after the game says "hoard", wait this long for the marker
 local HOARD_DETECT_SECONDS = 5         -- after Intuition, look for the hoard marker this long (usually 0.5-2s; occasionally later)
-local HOARD_RETRY_SECONDS = 30         -- keep trying to open the hoard this long (e.g. waiting out an otter trap)
+local HOARD_RETRY_SECONDS = 30         -- wait this long on the spot for the hoard to be discovered (e.g. waiting out an otter trap)
+-- The hoard counts toward the achievements as soon as it's discovered (the coffer appears and
+-- the game says "You discover a piece of the Accursed Hoard!"). Opening it is pointless here:
+-- hoard loot is only awarded for clearing the floor set's boss, and we always leave.
+local DISCOVER_CHAT_WAIT = 3           -- after the coffer appears, wait up to this long for the "discover" chat line
 
 -- ============================================================
 -- Steps that still need confirming in game (see notes in chat)
@@ -622,6 +629,38 @@ local function SpeedUp(target, hoard)
     end
 end
 
+-- Coffer timing (Debug log): how long after reaching the hoard spot the coffer appears, and how
+-- far from the spot we are when it does. Measured over ~390 hoards: 1.7-3.0s, always within 0.25y.
+local ON_SPOT_DIST = 1.0   -- within this many yalms (flat distance) counts as standing on the spot
+local Environment = nil
+pcall(function() Environment = luanet.import_type("System.Environment") end)
+local function Ms()
+    local ok, v = pcall(function() return Environment.TickCount64 end)
+    return ok and v or nil
+end
+
+local hoardTimer = nil   -- {Pos, Start, OnSpot, Done}
+
+local function TimerStart(pos)
+    hoardTimer = { Pos = { X = pos.X, Z = pos.Z }, Start = Ms(), OnSpot = nil, Done = false }
+end
+
+-- Call often while heading to and standing on the spot.
+local function TimerTick()
+    local h = hoardTimer
+    if h == nil or h.Done or h.Start == nil then return end
+    local now = Ms()
+    local p = Entity.Player.Position
+    local d = math.sqrt((p.X - h.Pos.X) ^ 2 + (p.Z - h.Pos.Z) ^ 2)
+    if h.OnSpot == nil and d <= ON_SPOT_DIST then h.OnSpot = now end
+    if FindObject(HOARD_COFFER_ID) ~= nil then
+        h.Done = true
+        local wait = h.OnSpot and (now - h.OnSpot) / 1000 or nil
+        LogD(string.format("Coffer appeared %s, %.1fy from the spot",
+            wait and string.format("%.2fs after reaching the spot", wait) or "before reaching the spot", d))
+    end
+end
+
 local function MoveTo(pos)
     IPC.vnavmesh.PathfindAndMoveTo(pos, false)
     -- wait for the path to be computed and movement to begin, so we're facing along the path
@@ -631,8 +670,9 @@ local function MoveTo(pos)
     local stuck = StuckWatcher(pos)
     local t = 0
     while IPC.vnavmesh.IsRunning() and not IsDead() do
-        Wait(0.5); t = t + 0.5
-        stuck(0.5)
+        Wait(0.25); t = t + 0.25
+        stuck(0.25)
+        TimerTick()
         if t >= 120 then error("Timed out waiting for moving to hoard") end
     end
 end
@@ -755,6 +795,239 @@ local function Explore()
 end
 
 -- ============================================================
+-- Hoard spot file: every hoard position Intuition reveals is kept in hoh_hoard_spots.csv in
+-- SND's config folder, one line per spot with how many times a hoard was found there
+-- (setting "RecordSpots"). Works for any deep dungeon floor set: spots are keyed by territory.
+-- It's the list of places a hoard can be, for searching without Intuition.
+-- Format: territory,x,y,z,finds   (x/y/z = average of the finds at that spot)
+-- ============================================================
+local SPOTS_FILE = Svc.PluginInterface.ConfigDirectory.FullName .. "\\hoh_hoard_spots.csv"
+-- Finds closer than this are the same spot. Kept small: Palantir's data has distinct spots under
+-- 1y apart, and the Intuition marker seems to sit at a fixed point, so a repeat find should land
+-- (almost) exactly on the saved position. Each find logs how far it was from the nearest saved
+-- spot, to check that.
+local SPOT_SAME_DIST = 0.5
+local RECORD_SPOTS = CfgBool("RecordSpots", false)
+
+local function Territory()
+    local ok, t = pcall(function() return Svc.ClientState.TerritoryType end)
+    return ok and t or 0
+end
+
+local function AddFindTo(spots, terr, x, y, z, n)
+    for _, sp in ipairs(spots) do
+        if sp.T == terr and (sp.X - x) ^ 2 + (sp.Z - z) ^ 2 < SPOT_SAME_DIST ^ 2 then
+            local total = sp.N + n
+            sp.X = sp.X + (x - sp.X) * n / total
+            sp.Y = sp.Y + (y - sp.Y) * n / total
+            sp.Z = sp.Z + (z - sp.Z) * n / total
+            sp.N = total
+            return
+        end
+    end
+    table.insert(spots, { T = terr, X = x, Y = y, Z = z, N = n })
+end
+
+-- Reads the spot file: list of {T, X, Y, Z, N}. Also reads the older one-line-per-find format
+-- (time,territory,x,y,z,startX,startZ) and folds it into spots.
+local oldFinds = {}   -- old-format lines seen while loading (copied into the raw finds log once)
+
+local function LoadSpots()
+    local spots = {}
+    oldFinds = {}
+    local f = io.open(SPOTS_FILE, "r")
+    if f == nil then return spots end
+    for line in f:lines() do
+        local t, x, y, z, n = line:match("^(%d+),([%-%d%.]+),([%-%d%.]+),([%-%d%.]+),(%d+)%s*$")
+        if t ~= nil then
+            AddFindTo(spots, tonumber(t), tonumber(x), tonumber(y), tonumber(z), tonumber(n))
+        else
+            t, x, y, z = line:match("^%d%d%d%d%-[^,]*,(%d+),([%-%d%.]+),([%-%d%.]+),([%-%d%.]+)")
+            if t ~= nil then
+                AddFindTo(spots, tonumber(t), tonumber(x), tonumber(y), tonumber(z), 1)
+                table.insert(oldFinds, line:match("^([^,]*,[^,]*,[^,]*,[^,]*,[^,]*)"))
+            end
+        end
+    end
+    f:close()
+    return spots
+end
+
+-- Writes to a temporary file first, then swaps it in, so a crash mid-write can't wipe the list.
+local function SaveSpots(spots)
+    table.sort(spots, function(a, b)
+        if a.T ~= b.T then return a.T < b.T end
+        if a.X ~= b.X then return a.X < b.X end
+        return a.Z < b.Z
+    end)
+    local tmp = SPOTS_FILE .. ".tmp"
+    local f = io.open(tmp, "w")
+    if f == nil then return false end
+    f:write("territory,x,y,z,finds\n")
+    for _, sp in ipairs(spots) do
+        f:write(string.format("%d,%.2f,%.2f,%.2f,%d\n", sp.T, sp.X, sp.Y, sp.Z, sp.N))
+    end
+    f:close()
+    os.remove(SPOTS_FILE)
+    return os.rename(tmp, SPOTS_FILE) and true or false
+end
+
+-- Per territory: finds, different spots, and the Good-Turing chance that the next find is at a
+-- spot not seen yet (spots found only once / all finds).
+-- Raw log too, one line per find (time,territory,x,y,z), so spots can be re-grouped later with a
+-- different same-spot distance once we know how much a spot's position varies between finds.
+local FINDS_FILE = Svc.PluginInterface.ConfigDirectory.FullName .. "\\hoh_hoard_finds.csv"
+
+-- Per territory, from the raw finds log in order: how many finds since the last one at a spot not
+-- seen before. A long run (~3x the number of spots, e.g. ~800 on floor 11) means the list is
+-- very likely complete.
+local function FindsSinceNewSpot()
+    local seen, since = {}, {}
+    local f = io.open(FINDS_FILE, "r")
+    if f == nil then return since end
+    for line in f:lines() do
+        local t, x, z = line:match("^[^,]*,(%d+),([%-%d%.]+),[%-%d%.]+,([%-%d%.]+)")
+        if t ~= nil then
+            t, x, z = tonumber(t), tonumber(x), tonumber(z)
+            local list = seen[t] or {}
+            seen[t] = list
+            local known = false
+            for _, p in ipairs(list) do
+                if (p[1] - x) ^ 2 + (p[2] - z) ^ 2 < SPOT_SAME_DIST ^ 2 then known = true; break end
+            end
+            if known then
+                since[t] = (since[t] or 0) + 1
+            else
+                table.insert(list, { x, z })
+                since[t] = 0
+            end
+        end
+    end
+    f:close()
+    return since
+end
+
+local function LogSpotStats(prefix)
+    local spots = LoadSpots()
+    if #spots == 0 then LogI(prefix .. "no hoard spots recorded yet"); return end
+    local by = {}
+    for _, sp in ipairs(spots) do
+        local s = by[sp.T] or { finds = 0, spots = 0, once = 0 }
+        s.finds = s.finds + sp.N; s.spots = s.spots + 1
+        if sp.N == 1 then s.once = s.once + 1 end
+        by[sp.T] = s
+    end
+    local since = FindsSinceNewSpot()
+    for terr, s in pairs(by) do
+        LogI(string.format("%sterritory %d: %d hoard finds at %d different spots; chance the next one is a new spot: %.0f%%; %s finds since the last new spot",
+            prefix, terr, s.finds, s.spots, 100 * s.once / s.finds, since[terr] and tostring(since[terr]) or "?"))
+    end
+end
+
+local function RecordSpot(pos)
+    if not RECORD_SPOTS then return end
+    local terr = Territory()
+    local spots = LoadSpots()
+    -- First time: carry over finds already recorded in the old one-line-per-find spot file.
+    local existing = io.open(FINDS_FILE, "r")
+    if existing ~= nil then existing:close() end
+    local raw = io.open(FINDS_FILE, "a")
+    if raw ~= nil then
+        if existing == nil then
+            for _, l in ipairs(oldFinds) do raw:write(l .. "\n") end
+        end
+        raw:write(string.format("%s,%d,%.3f,%.3f,%.3f\n", os.date("!%Y-%m-%dT%H:%M:%SZ"), terr, pos.X, pos.Y, pos.Z))
+        raw:close()
+    else
+        LogI("WARNING: couldn't write " .. FINDS_FILE .. " (open in another program?)")
+    end
+    local near, nearN = nil, 0
+    for _, sp in ipairs(spots) do
+        if sp.T == terr then
+            local d = math.sqrt((sp.X - pos.X) ^ 2 + (sp.Z - pos.Z) ^ 2)
+            if near == nil or d < near then near, nearN = d, sp.N end
+        end
+    end
+    if near ~= nil and near < SPOT_SAME_DIST then
+        LogD(string.format("Hoard spot seen before (find #%d there, %.2fy from the saved position)", nearN + 1, near))
+    else
+        LogD(string.format("New hoard spot%s", near and string.format(" (nearest known spot %.2fy away)", near) or ""))
+    end
+    AddFindTo(spots, terr, pos.X, pos.Y, pos.Z, 1)
+    if not SaveSpots(spots) then
+        LogI("WARNING: couldn't save the hoard spot to " .. SPOTS_FILE .. " (open in another program?)")
+    end
+end
+
+-- ============================================================
+-- Run tally: hoh_hoard_runs.csv in SND's config folder keeps running totals per territory, so
+-- the hoard rate covers every run, not just what's still in dalamud.log.
+-- Format: territory,runs,hoard_floors,taken,missed,not_found,deaths
+-- (hoard floor = Intuition said there was a hoard, whether or not it was taken)
+-- ============================================================
+local TALLY_FILE = Svc.PluginInterface.ConfigDirectory.FullName .. "\\hoh_hoard_runs.csv"
+local TALLY_FIELDS = { "runs", "hoard_floors", "taken", "missed", "not_found", "deaths" }
+
+local function LoadTally()
+    local tally = {}
+    local f = io.open(TALLY_FILE, "r")
+    if f == nil then return tally end
+    for line in f:lines() do
+        local nums = {}
+        for v in line:gmatch("[^,]+") do table.insert(nums, tonumber(v)) end
+        if #nums == 7 and nums[1] ~= nil then
+            local t = {}
+            for i, k in ipairs(TALLY_FIELDS) do t[k] = nums[i + 1] or 0 end
+            tally[nums[1]] = t
+        end
+    end
+    f:close()
+    return tally
+end
+
+local function SaveTally(tally)
+    local tmp = TALLY_FILE .. ".tmp"
+    local f = io.open(tmp, "w")
+    if f == nil then return false end
+    f:write("territory," .. table.concat(TALLY_FIELDS, ",") .. "\n")
+    for terr, t in pairs(tally) do
+        local vals = {}
+        for _, k in ipairs(TALLY_FIELDS) do table.insert(vals, tostring(t[k] or 0)) end
+        f:write(terr .. "," .. table.concat(vals, ",") .. "\n")
+    end
+    f:close()
+    os.remove(TALLY_FILE)
+    return os.rename(tmp, TALLY_FILE) and true or false
+end
+
+local function CountRun(terr, result, died)
+    local tally = LoadTally()
+    local t = tally[terr] or {}
+    for _, k in ipairs(TALLY_FIELDS) do t[k] = t[k] or 0 end
+    t.runs = t.runs + 1
+    if result ~= "none" then t.hoard_floors = t.hoard_floors + 1 end
+    if result == "taken" then t.taken = t.taken + 1 end
+    if result == "missed" then t.missed = t.missed + 1 end
+    if result == "unseen" then t.not_found = t.not_found + 1 end
+    if died then t.deaths = t.deaths + 1 end
+    tally[terr] = t
+    if not SaveTally(tally) then
+        LogI("WARNING: couldn't save the run tally to " .. TALLY_FILE .. " (open in another program?)")
+    end
+end
+
+local function LogTally(prefix)
+    for terr, t in pairs(LoadTally()) do
+        if t.runs > 0 then
+            local p = t.hoard_floors / t.runs
+            LogI(string.format("%sterritory %d: %d runs, hoard on %d floors (%.1f%% \u{00B1} %.1f), %d taken, %d missed, %d not found, %d deaths",
+                prefix, terr, t.runs, t.hoard_floors, 100 * p, 196 * math.sqrt(p * (1 - p) / t.runs),
+                t.taken, t.missed, t.not_found, t.deaths))
+        end
+    end
+end
+
+-- ============================================================
 -- One attempt: returns true if the hoard was taken
 -- ============================================================
 local function Attempt()
@@ -775,6 +1048,7 @@ local function Attempt()
     -- It arrives ~1s after Intuition; the marker ~0.3s after that. Without the watcher, fall back
     -- to waiting HOARD_DETECT_SECONDS for the marker.
     HOH_SENSE = nil
+    HOH_DISCOVERED = false
     UseIntuition()
 
     local marker = nil
@@ -820,6 +1094,8 @@ local function Attempt()
         LogD(string.format("Marker seen %.2fs after Intuition", t))
     end
     LogD("Hoard found")
+    RecordSpot(marker.Position)
+    TimerStart(marker.Position)
     if STEALTH then LogD("Status effects: " .. StatusNames()) end
 
     MoveTo(marker.Position)
@@ -828,45 +1104,27 @@ local function Attempt()
         return "died"
     end
 
-    -- Standing on the spot makes the coffer appear. Interact until it's gone (opened), retrying
-    -- for a while in case we're transformed by a trap (otter etc.) and can't open it yet.
-    local function CofferUp()
-        local c = FindObject(HOARD_COFFER_ID)
-        return c ~= nil and c.Targetable, c
-    end
-
-    -- Check often (so we leave as soon as it's opened), but only re-interact every 2s.
-    local t = 0
-    local nextInteract = 0
-    local seen = false
+    -- Standing on the spot makes the coffer appear (~2.5s). Wait for the game's "You discover a
+    -- piece of the Accursed Hoard!" (or a few seconds after the coffer appears), then leave.
+    local t, appearedAt = 0, nil
     while t < HOARD_RETRY_SECONDS do
-        local up, c = CofferUp()
-        if up then
-            seen = true
-            if t >= nextInteract then
-                local e = Entity.GetEntityByName(c.Name)
-                if e ~= nil then
-                    e:SetAsTarget()
-                    e:Interact()
-                end
-                nextInteract = t + 2
-            end
-        elseif seen then
-            LogD("Hoard taken")
+        TimerTick()
+        if HOH_DISCOVERED then
+            LogD(string.format("Hoard discovered (chat), %.1fs", t))
+            return "taken"
+        end
+        if appearedAt == nil and FindObject(HOARD_COFFER_ID) ~= nil then appearedAt = t end
+        if appearedAt ~= nil and t - appearedAt >= DISCOVER_CHAT_WAIT then
+            LogD("Hoard discovered (coffer appeared; no chat line seen)")
             return "taken"
         end
         if IsDead() then
-            LogI("Died before opening the hoard")
+            LogI("Died before discovering the hoard")
             return "died"
         end
-        Wait(0.3); t = t + 0.3
+        Wait(0.25); t = t + 0.25
     end
-
-    if seen then
-        LogI("Hoard NOT taken: coffer still there after " .. HOARD_RETRY_SECONDS .. "s (transformed or blocked?)")
-    else
-        LogI("Hoard NOT taken: coffer never appeared (didn't reach the spot?)")
-    end
+    LogI("Hoard NOT discovered: coffer never appeared after " .. HOARD_RETRY_SECONDS .. "s (didn't reach the spot, or transformed?)")
     return "missed"
 end
 
@@ -876,16 +1134,23 @@ end
 local hoards, missed, unseen, deaths = 0, 0, 0, 0
 LogD("Landing check (vnavmesh): " .. (V3 ~= nil and "available" or "unavailable") .. ", normal leave: " .. (EventFramework ~= nil and "available" or "unavailable"))
 LogI(string.format("Starting: %d runs, save file %d", MAX_RUNS, SAVE_SLOT))
+if RECORD_SPOTS then LogSpotStats("Spot log: ") end
+LogTally("Run tally: ")
 for i = 1, MAX_RUNS do
     local result = Attempt()
+    local terr = Territory()
     if result == "taken" then hoards = hoards + 1 elseif result == "missed" then missed = missed + 1 elseif result == "unseen" then unseen = unseen + 1 end
-    if LeaveDuty() then
+    local died = LeaveDuty()
+    if died then
         deaths = deaths + 1
         if result == "taken" then LogI("Died after opening the hoard (it still counts)") end
     end
+    CountRun(terr, result, died)
     LogI(string.format("Run %d done, hoards taken: %d, missed: %d, sensed-not-found: %d, deaths: %d", i, hoards, missed, unseen, deaths))
     Wait(3)
 end
+if RECORD_SPOTS then LogSpotStats("Spot log: ") end
+LogTally("Run tally: ")
 LogI(string.format("Finished %d runs: %d hoards taken, %d missed, %d sensed-not-found, %d deaths", MAX_RUNS, hoards, missed, unseen, deaths))
 collectgarbage("collect")
 collectgarbage("collect")
