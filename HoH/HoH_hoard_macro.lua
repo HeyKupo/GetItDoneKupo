@@ -1,54 +1,34 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.2.0
+version: 1.3.0
 description: Farms Accursed Hoards in Heaven-on-High. https://github.com/HeyKupo/GetItDoneKupo/tree/main/HoH
 plugin_dependencies:
 - vnavmesh
 dependencies:
-- source: https://github.com/HeyKupo/GetItDoneKupo/blob/v1.2.0/HoH/hoh_hoard.lua
+- source: https://github.com/HeyKupo/GetItDoneKupo/blob/v1.3.0/HoH/hoh_hoard.lua
 configs:
-  ScriptPath:
-    default: ""
-    description: Leave empty. Only for testing a local copy of hoh_hoard.lua (full path); normally SND downloads it.
   SaveSlot:
     default: 1
-    description: Which save file to enter with (1 or 2). Deep dungeon saves are tied to the job that made them.
+    description: Save file to use (1 or 2).
     min: 1
     max: 2
   Runs:
-    default: 30000
-    description: How many times to enter
-    min: 1
+    default: 100
+    description: Stop after this many runs (0 = until you stop it).
+    min: 0
     max: 30000
-  Protection:
-    description: What to use before running to the hoard
-    is_choice: true
-    default: "Inferno magicite"
-    choices:
-      - "Inferno magicite"
-      - "Crag magicite"
-      - "Vortex magicite"
-      - "Pomander of Concealment"
-      - "Pomander of Petrification"
-      - "None"
-  Safety:
-    default: true
-    description: (Recommended) Use a Pomander of Safety on the way to the hoard. Removes traps so you don't lose time transformed.
+  SixthSense:
+    default: false
+    description: Search without Intuition (Of the Sixth Sense).
   RecordSpots:
     default: false
-    description: Keep a list of where hoards were found (hoh_hoard_spots.csv and hoh_hoard_finds.csv in SND's config folder), for searching without Intuition later.
-  Dash:
-    description: Forward dash to use on the way to the hoard (only fires if your current job has it)
-    is_choice: true
-    default: "Auto (by job)"
-    choices:
-      - "Auto (by job)"
-      - "Smudge (PCT)"
-      - "Aetherial Shift (WHM)"
-      - "Hell's Ingress (RPR)"
-      - "En Avant (DNC)"
-      - "None"
+    description: Leave off (only for improving spot data).
+    section: Development
+  ScriptPath:
+    default: ""
+    description: Leave empty (testing only).
+    section: Development
 [[End Metadata]]
 --]=====]
 -- Intuition result watcher. SND only hooks trigger functions written in the macro text itself,

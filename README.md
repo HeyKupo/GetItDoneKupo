@@ -4,8 +4,8 @@ Lua scripts for [SomethingNeedDoing](https://github.com/Jaksuhn/SomethingNeedDoi
 
 | Script | What it does |
 |---|---|
-| [HoH](HoH/) | Farms Accursed Hoards in Heaven-on-High: enter on a save, use Intuition, take the hoard if it's there, leave, and repeat. |
+| [HoH](HoH/) | Farms Accursed Hoards in Heaven-on-High, for the hoard titles and Of the Sixth Sense. |
 
-All scripts are written for SND v15+ Lua macros.
+Needs SND 15.15 or later.
 
 MIT licensed. See [LICENSE](LICENSE).
