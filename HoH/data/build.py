@@ -26,10 +26,8 @@ body = ",\n".join("    " + ", ".join(items[i:i + 3]) for i in range(0, len(items
 i = src.index("local SHIPPED_SPOTS = {")
 e = src.index("\n}", i)
 src = src[:i] + "local SHIPPED_SPOTS = {\n" + body + src[e:]
-src = re.sub(r"-- \{territory, x, y, z, finds\}; \d+ spots, \d+ finds \([\d-]+\)",
-             "-- {territory, x, y, z, finds}; %d spots, %d finds (%s)"
-             % (len(spots), finds, max(r[0] for r in csv.reader(open(os.path.join(HERE, "hoh_hoard_finds.csv"))) if r)[:10]),
-             src)
+src = re.sub(r"-- \{territory, x, y, z, finds\}; \d+ spots, \d+ finds(?: \([\d-]+\))?",
+             "-- {territory, x, y, z, finds}; %d spots, %d finds" % (len(spots), finds), src)
 print("spots: %d spots, %d finds" % (len(spots), finds))
 
 # Hallways
