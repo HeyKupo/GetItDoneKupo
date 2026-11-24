@@ -302,25 +302,11 @@ end
 -- Tileset: layout type 1 = A, 2 = B, 5 = hall of fallacies.
 function DDX.Tileset(t) return ({ [1] = "A", [2] = "B", [5] = "hall" })[t] or "?" end
 
--- Where the recorded data goes (spots, finds, room changes): with ScriptPath set (development,
--- running the repo copy) and a data folder next to it, there (HoH/data, so recordings land in the
--- repo); otherwise SND's config folder.
-DDX.DATA_DIR = Svc.PluginInterface.ConfigDirectory.FullName
-pcall(function()
-    local sp = tostring(Config.Get("ScriptPath") or "")
-    local dir = sp:match("^(.*)[\\/][^\\/]+$")
-    if sp ~= "" and dir ~= nil then
-        local f = io.open(dir .. "\\data\\README.md", "r")
-        if f ~= nil then f:close(); DDX.DATA_DIR = dir .. "\\data" end
-    end
-end)
-LogD("Recorded data goes to " .. DDX.DATA_DIR)
-
 -- With RecordSpots on (development): on every wait, note the room we're in; log each floor's
 -- start room and every room change with where it happened, to refine HOH11's hallway points
 -- (halls["a>b"] = median switch point per direction). hoh_roomchanges.csv.
 DDX.record = false   -- set from the RecordSpots setting below
-DDX.ROOMLOG = DDX.DATA_DIR .. "\\hoh_roomchanges.csv"
+DDX.ROOMLOG = Svc.PluginInterface.ConfigDirectory.FullName .. "\\hoh_roomchanges.csv"
 DDX.w = { floor = nil, room = -1 }
 pcall(function() DDX.Env = luanet.import_type("System.Environment") end)
 function DDX.WatchRoom()
@@ -1116,7 +1102,7 @@ end
 -- It's the list of places a hoard can be, for searching without Intuition.
 -- Format: territory,x,y,z,finds   (x/y/z = average of the finds at that spot)
 -- ============================================================
-local SPOTS_FILE = DDX.DATA_DIR .. "\\hoh_hoard_spots.csv"
+local SPOTS_FILE = Svc.PluginInterface.ConfigDirectory.FullName .. "\\hoh_hoard_spots.csv"
 -- Finds closer than this are the same spot. Kept small: Palantir's data has distinct spots under
 -- 1y apart, and the Intuition marker seems to sit at a fixed point, so a repeat find should land
 -- (almost) exactly on the saved position. Each find logs how far it was from the nearest saved
@@ -1230,7 +1216,7 @@ end
 -- spot not seen yet (spots found only once / all finds).
 -- Raw log too, one line per find (time,territory,x,y,z), so spots can be re-grouped later with a
 -- different same-spot distance once we know how much a spot's position varies between finds.
-local FINDS_FILE = DDX.DATA_DIR .. "\\hoh_hoard_finds.csv"
+local FINDS_FILE = Svc.PluginInterface.ConfigDirectory.FullName .. "\\hoh_hoard_finds.csv"
 
 -- Per territory, from the raw finds log in order: how many finds since the last one at a spot not
 -- seen before. A long run (~3x the number of spots, e.g. ~800 on floor 11) means the list is
