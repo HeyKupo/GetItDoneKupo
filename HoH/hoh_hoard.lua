@@ -302,7 +302,62 @@ end
 -- Tileset: layout type 1 = A, 2 = B, 5 = hall of fallacies.
 function DDX.Tileset(t) return ({ [1] = "A", [2] = "B", [5] = "hall" })[t] or "?" end
 
-local function Wait(sec) yield("/wait " .. sec) end
+-- Where the recorded data goes (spots, finds, room changes): with ScriptPath set (development,
+-- running the repo copy) and a data folder next to it, there (HoH/data, so recordings land in the
+-- repo); otherwise SND's config folder.
+DDX.DATA_DIR = Svc.PluginInterface.ConfigDirectory.FullName
+pcall(function()
+    local sp = tostring(Config.Get("ScriptPath") or "")
+    local dir = sp:match("^(.*)[\\/][^\\/]+$")
+    if sp ~= "" and dir ~= nil then
+        local f = io.open(dir .. "\\data\\README.md", "r")
+        if f ~= nil then f:close(); DDX.DATA_DIR = dir .. "\\data" end
+    end
+end)
+LogD("Recorded data goes to " .. DDX.DATA_DIR)
+
+-- With RecordSpots on (development): on every wait, note the room we're in; log each floor's
+-- start room and every room change with where it happened, to refine HOH11's hallway points
+-- (halls["a>b"] = median switch point per direction). hoh_roomchanges.csv.
+DDX.record = false   -- set from the RecordSpots setting below
+DDX.ROOMLOG = DDX.DATA_DIR .. "\\hoh_roomchanges.csv"
+DDX.w = { floor = nil, room = -1 }
+pcall(function() DDX.Env = luanet.import_type("System.Environment") end)
+function DDX.WatchRoom()
+    if not DDX.record then return end
+    pcall(function()
+        local dd = InstancedContent.DeepDungeon
+        local w = DDX.w
+        if not dd.IsActive then w.floor = nil; w.room = -1; return end
+        local room = dd.CurrentRoomIndex
+        if room < 0 then return end
+        local p = Entity.Player.Position
+        local x, y, z, t = p.X, p.Y, p.Z, DDX.Env.TickCount64 / 1000
+        local kind = nil
+        if w.floor == nil then
+            w.floor = string.format("%d,%d,%s", dd.DeepDungeonId, dd.Floor, DDX.Tileset(dd.LayoutInitializationType))
+            kind = "start"
+        elseif room ~= w.room then
+            local dt = t - w.t
+            local speed = math.sqrt((x - w.x) ^ 2 + (z - w.z) ^ 2) / math.max(dt, 0.05)
+            kind = speed < 15 and "change" or "teleport"   -- sprint is ~8y/s; Return/Passage jump
+        end
+        if kind ~= nil then
+            local old = io.open(DDX.ROOMLOG, "r")
+            local new = old == nil
+            if old ~= nil then old:close() end
+            local f = io.open(DDX.ROOMLOG, "a")
+            if f ~= nil then
+                if new then f:write("time,kind,dungeon,floor,tileset,from,to,x,y,z,prev_x,prev_z,dt\n") end
+                f:write(string.format("%s,%s,%s,%d,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n", os.date("!%Y-%m-%dT%H:%M:%SZ"), kind,
+                    w.floor, kind == "start" and -1 or w.room, room, x, y, z, w.x or x, w.z or z, w.t and (t - w.t) or 0))
+                f:close()
+            end
+        end
+        w.room, w.x, w.z, w.t = room, x, z, t
+    end)
+end
+local function Wait(sec) DDX.WatchRoom(); yield("/wait " .. sec) end
 
 local function WaitUntil(pred, timeoutSec, label)
     local t = 0
@@ -535,6 +590,110 @@ local function EnemiesNear(cx, cz, radius)
     return n, nearest
 end
 
+-- Patrols: enemy kinds that walk the floor and its hallways instead of staying put (floor 11:
+-- base 8896 moved ~110y per floor in 70 sightings, the others ~16y; the Heavenly
+-- Namazu). One counts as a threat if it's within DDX.PATROL_NEAR, or within DDX.PATROL_RADIUS
+-- and walking toward us (from where it was at the last check, so a dash toward it doesn't count).
+DDX.PATROL = { [8896] = true }
+-- Measured on floor 11 (hoh_aggro_probe): every enemy kind ignores you under Concealment,
+-- even at 1y. Without it: Namazu ~10y in front (2y behind is fine), Korpokkur ~11y, Shizuku
+-- (sprite) ~10y from any side, Shiomushi ~5y. Concealment takes ~1.5s to go on.
+DDX.PATROL_NEAR, DDX.PATROL_RADIUS, DDX.PATROL_COMING = 20, 40, 1.0   -- yalms, yalms, yalms/s toward us
+DDX.seen = {}   -- patrol id -> { x, z, t } at the last check
+-- Any living enemy within `radius` of (cx, cz), or a patrol that's a threat (above)? Returns
+-- true/false and a short description of the reason. comingOnly: only a patrol walking toward us.
+function DDX.ThreatNear(cx, cz, radius, comingOnly)
+    local hit = nil
+    local now = (DDX.Env ~= nil and DDX.Env.TickCount64 or 0) / 1000
+    pcall(function()
+        for obj in luanet.each(Svc.Objects) do
+            if obj ~= nil and string.find(tostring(obj.ObjectKind), "BattleNpc", 1, true)
+               and obj.SubKind == 5 and not obj.IsDead and obj.IsTargetable then
+                local p = obj.Position
+                local dist = math.sqrt((p.X - cx) ^ 2 + (p.Z - cz) ^ 2)
+                if dist <= radius then hit = string.format("enemy %.0fy", dist); break end
+                if DDX.PATROL[obj.BaseId] then
+                    local name = tostring(obj.Name and obj.Name.TextValue or obj.BaseId)
+                    local id = tostring(obj.GameObjectId)
+                    local last = DDX.seen[id]
+                    -- keep the older sighting until it's 0.3s old, so checks close together still see movement
+                    if last == nil or now - last.t >= 0.3 then DDX.seen[id] = { x = p.X, z = p.Z, t = now } end
+                    if dist <= DDX.PATROL_NEAR and not comingOnly then hit = string.format("patrol %s %.0fy", name, dist); break end
+                    if dist <= DDX.PATROL_RADIUS and last ~= nil and now - last.t >= 0.3 and now - last.t <= 5 and dist > 0 then
+                        -- its own movement since the last check, along the line toward us
+                        local toward = ((p.X - last.x) * (cx - p.X) + (p.Z - last.z) * (cz - p.Z)) / dist / (now - last.t)
+                        if toward >= DDX.PATROL_COMING then
+                            hit = string.format("patrol %s %.0fy, coming at %.1fy/s", name, dist, toward); break
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    collectgarbage("collect")
+    collectgarbage("collect")
+    return hit ~= nil, hit
+end
+
+-- Would an enemy notice us at a spot, without Concealment? [base] = { range in its sight cone,
+-- range outside it, half-width of the cone in degrees }. Measured on floor 11 (probe):
+-- the three sight kinds alike: ~10.5y within ~45 degrees of where they face (aggro at 9.1-10.9y
+-- inside 40 degrees; 43-49 degrees is the edge), and outside that only at touching distance
+-- (1.0y straight behind a stationary Korpokkur, 1.6y beside a Shiomushi). The sprite (Shizuku)
+-- notices at ~10y from any side. The cone gets 10 extra degrees: enemies turn while idle.
+DDX.NOTICE = {
+    [8896] = { 10.5, 1.5, 55 },   -- Heavenly Namazu (patrol): sight
+    [8886] = { 10.5, 1.5, 55 },   -- Heavenly Korpokkur: sight
+    [8888] = { 10.5, 1.5, 55 },   -- Heavenly Shiomushi: sight
+    [8887] = { 10.5, 10.5, 180 }, -- Heavenly Shizuku (sprite): proximity, any side
+}
+DDX.NOTICE_OTHER = { 11.0, 11.0, 180 }  -- any kind not measured: all round
+DDX.NOTICE_MARGIN = 2                   -- yalms added to every range
+-- (Used for the dash and Concealment-renewal checks. Walking detours around enemies were tried
+-- and dropped: vnavmesh's real path strays too far from straight lines near walls.)
+-- Living enemies now, as plain values: { {x, z, fx, fz, base, name}, ... }
+function DDX.Enemies()
+    local list = {}
+    pcall(function()
+        for obj in luanet.each(Svc.Objects) do
+            if obj ~= nil and string.find(tostring(obj.ObjectKind), "BattleNpc", 1, true)
+               and obj.SubKind == 5 and not obj.IsDead and obj.IsTargetable then
+                local rot = obj.Rotation or 0
+                table.insert(list, { x = obj.Position.X, z = obj.Position.Z, fx = math.sin(rot), fz = math.cos(rot),
+                    base = obj.BaseId, name = tostring(obj.Name and obj.Name.TextValue or obj.BaseId) })
+            end
+        end
+    end)
+    collectgarbage("collect")
+    collectgarbage("collect")
+    return list
+end
+-- The first enemy in `list` that would notice us at (x, z), or nil.
+function DDX.NoticedAt(list, x, z, margin)
+    margin = margin or DDX.NOTICE_MARGIN
+    for _, e in ipairs(list) do
+        local dx, dz = x - e.x, z - e.z
+        local d = math.sqrt(dx * dx + dz * dz)
+        if d <= 13 + margin then
+            local n = DDX.NOTICE[e.base] or DDX.NOTICE_OTHER
+            local ang = d < 0.01 and 0 or math.deg(math.acos(math.max(-1, math.min(1, (e.fx * dx + e.fz * dz) / d))))
+            local r = (ang <= n[3] and n[1] or n[2]) + margin
+            if d <= r then return e, d end
+        end
+    end
+    return nil
+end
+-- The first enemy that would notice us somewhere on the straight line from a to b (every 2y).
+function DDX.NoticedOnLine(list, ax, az, bx, bz, margin)
+    local len = math.sqrt((bx - ax) ^ 2 + (bz - az) ^ 2)
+    local steps = math.max(1, math.ceil(len / 2))
+    for i = 0, steps do
+        local f = i / steps
+        local e, d = DDX.NoticedAt(list, ax + (bx - ax) * f, az + (bz - az) * f, margin)
+        if e ~= nil then return e, d end
+    end
+    return nil
+end
 -- Would a dash of `range` yalms from here land on walkable ground (not inside a wall)?
 -- Returns true/false, or nil if it can't tell (then we dash anyway, as before).
 local function LandingOnMesh(range)
@@ -651,6 +810,21 @@ end
 -- land in a wall), any extra dash charges, the on-the-move pomander, then Sprint.
 -- Call once movement has started.
 local function SpeedUp(target, hoard)
+    -- Concealment coming and a threat close (a patrol on its way, or any enemy within
+    -- ENEMY_DASH_RADIUS): put it on now, before (more) dashing (a Namazu nearly
+    -- caught one; a dash toward it closes in fast). Checked again before each dash.
+    local function ConcealIfThreat()
+        -- Sixth Sense holds its first Concealment itself: it hands over a check to run here too,
+        -- so that one also goes on before any dash or Sprint.
+        if PENDING_CONCEAL == nil then return DDX.concealHook ~= nil and DDX.concealHook() or false end
+        local p = Entity.Player.Position
+        local near, why = DDX.ThreatNear(p.X, p.Z, ENEMY_DASH_RADIUS)
+        if not near then return false end
+        LogD("Concealment first: " .. why)
+        PomOnTheMove(hoard)
+        return true
+    end
+    ConcealIfThreat()
     local d = CurrentDash()
     if STEALTH and d ~= nil then
         LogD("Concealed: no dash")
@@ -659,18 +833,21 @@ local function SpeedUp(target, hoard)
 
     -- With Concealment coming, don't dash near enemies (around us or where we'd land).
     local function SafeToDash()
-        if PENDING_CONCEAL == nil and not HOH_DASH_CHECK then return true end   -- Sixth Sense: always check
+        -- No Concealment coming (a magicite-only save, normal mode): dash regardless. A fight just
+        -- means the magicite goes off at the hoard while the coffer is due anyway.
+        if PENDING_CONCEAL == nil and not HOH_DASH_CHECK then return true end
+        -- Would anything notice us over the dash and the ~1.5s of running after it, before
+        -- Concealment is on? (Measured ranges and facing, DDX.NOTICE: an enemy facing away
+        -- doesn't count; it used to be any enemy within 20y.)
         local x, y, z, fx, fz = PosAndFacing()
-        local n1, near1 = EnemiesNear(x, z, ENEMY_DASH_RADIUS)
-        local n2, near2 = 0, nil
-        if fx ~= nil then n2, near2 = EnemiesNear(x + fx * d.range, z + fz * d.range, ENEMY_DASH_RADIUS) end
-        local nearest = near1
-        if near2 ~= nil and (nearest == nil or near2 < nearest) then nearest = near2 end
-        if n1 + n2 > 0 then
-            LogD(string.format("%s skipped: enemy within %dy (nearest %.0fy)", d.action, ENEMY_DASH_RADIUS, nearest))
+        if fx == nil then return EnemiesNear(x, z, ENEMY_DASH_RADIUS) == 0 end
+        local reach = d.range + 12
+        local e, dist = DDX.NoticedOnLine(DDX.Enemies(), x, z, x + fx * reach, z + fz * reach)
+        if e ~= nil then
+            LogD(string.format("%s skipped: %s would notice (%.0fy from the line)", d.action, e.name, dist))
             return false
         end
-        LogD("Enemy check: nearest " .. (nearest and string.format("%.0fy", nearest) or "none seen"))
+        LogD("Enemy check: clear")
         return true
     end
 
@@ -681,6 +858,7 @@ local function SpeedUp(target, hoard)
         if ready == nil then ready = (not isFirst) or DashReady(d) end   -- no game check: old behaviour
         if not ready then return "wait", "not ready (status " .. tostring(status) .. ")" end
         if LandingOnMesh(d.range) == false then return "wait", "would land in a wall" end
+        if ConcealIfThreat() then return "stop" end
         if not SafeToDash() then return "stop" end
         LogD(string.format("%s (%.0fy away)", d.action, DistanceTo(target)))
         yield('/ac "' .. d.action .. '"')
@@ -714,6 +892,9 @@ local function SpeedUp(target, hoard)
         end
     end
 
+    -- Last check before Sprint: something close now (after the dashes)? Concealment first, so
+    -- Sprint's animation lock doesn't swallow it (an ignored press, then caught).
+    ConcealIfThreat()
     local usedPom = PomOnTheMove(hoard)
 
     -- Sprint, retried until it's on (the end of a pomander animation can swallow it).
@@ -862,6 +1043,15 @@ local function Explore()
         return nil
     end
 
+    -- First, room by room in order of where hoards have been found on this layout (spot data);
+    -- then, if it still hasn't shown up, the general search below.
+    if HOH_EXPLORE_ROOMS ~= nil then
+        local ok, err = pcall(HOH_EXPLORE_ROOMS, function() return FindObject(HOARD_MARKER_ID) ~= nil end)
+        if not ok then LogD("Explore by spots: " .. tostring(err)) end
+        local m = FindObject(HOARD_MARKER_ID)
+        if m ~= nil or IsDead() then return m end
+    end
+
     local t = 0
     local legs = 0
     local first = true
@@ -926,13 +1116,14 @@ end
 -- It's the list of places a hoard can be, for searching without Intuition.
 -- Format: territory,x,y,z,finds   (x/y/z = average of the finds at that spot)
 -- ============================================================
-local SPOTS_FILE = Svc.PluginInterface.ConfigDirectory.FullName .. "\\hoh_hoard_spots.csv"
+local SPOTS_FILE = DDX.DATA_DIR .. "\\hoh_hoard_spots.csv"
 -- Finds closer than this are the same spot. Kept small: Palantir's data has distinct spots under
 -- 1y apart, and the Intuition marker seems to sit at a fixed point, so a repeat find should land
 -- (almost) exactly on the saved position. Each find logs how far it was from the nearest saved
 -- spot, to check that.
 local SPOT_SAME_DIST = 0.5
 local RECORD_SPOTS = CfgBool("RecordSpots", false)
+DDX.record = RECORD_SPOTS   -- room-change log too (see DDX.WatchRoom)
 
 local function Territory()
     local ok, t = pcall(function() return Svc.ClientState.TerritoryType end)
@@ -1039,7 +1230,7 @@ end
 -- spot not seen yet (spots found only once / all finds).
 -- Raw log too, one line per find (time,territory,x,y,z), so spots can be re-grouped later with a
 -- different same-spot distance once we know how much a spot's position varies between finds.
-local FINDS_FILE = Svc.PluginInterface.ConfigDirectory.FullName .. "\\hoh_hoard_finds.csv"
+local FINDS_FILE = DDX.DATA_DIR .. "\\hoh_hoard_finds.csv"
 
 -- Per territory, from the raw finds log in order: how many finds since the last one at a spot not
 -- seen before. A long run (~3x the number of spots, e.g. ~800 on floor 11) means the list is
@@ -1445,6 +1636,20 @@ end
 DDX.hoard = nil   -- normal runs: this floor's hoard ({X, Z}), for magicite timing
 local function NormalCombatCheck()
     if IsDead() or not InCombat() then return end
+    if DDX.fightLogged == false then
+        -- Who started it, and where (debug).
+        DDX.fightLogged = true
+        pcall(function()
+            local lp = Svc.Objects.LocalPlayer
+            for obj in luanet.each(Svc.Objects) do
+                if obj ~= nil and obj.TargetObjectId == lp.GameObjectId and string.find(tostring(obj.ObjectKind), "BattleNpc", 1, true) then
+                    local dx, dz = lp.Position.X - obj.Position.X, lp.Position.Z - obj.Position.Z
+                    LogD(string.format("Fight started by %s at %.1fy: it at (%.1f, %.1f), us at (%.1f, %.1f)", tostring(obj.Name.TextValue),
+                        math.sqrt(dx * dx + dz * dz), obj.Position.X, obj.Position.Z, lp.Position.X, lp.Position.Z))
+                end
+            end
+        end)
+    end
     -- Attacked on the way: keep running and use the magicite at the hoard, so we discover it and
     -- can leave cleanly; right away only if the hoard is far or HP is getting low.
     if DDX.hoard ~= nil then
@@ -1555,8 +1760,9 @@ local function Attempt()
         local wps = HOH_ROUTE ~= nil and HOH_ROUTE(markerPos.X, markerPos.Z) or nil
         if wps ~= nil and #wps > 0 then
             LogD(string.format("Doorway route: %d waypoints to the hoard's room", #wps))
-            HOH_WALK(wps, markerPos, NormalCombatCheck)
         end
+        DDX.fightLogged = false
+        if wps ~= nil and #wps > 0 then HOH_WALK(wps, markerPos, NormalCombatCheck) end
         if not IsDead() then MoveTo(markerPos, nil, NormalCombatCheck) end
     end
     if IsDead() then
@@ -1688,6 +1894,21 @@ function DD.Door(geo, r, nb)
     return {}
 end
 
+-- A little variety: a hallway point moved at random up to DD.JITTER_ALONG yalms
+-- along the hallway and DD.JITTER_ACROSS across it. Any point in the hallway does the same job,
+-- so the route stays as good, but no two walks through it are the same.
+DD.JITTER_ALONG, DD.JITTER_ACROSS = 3, 1
+function DD.Jitter(geo, r, nb, p)
+    local a, b = geo[r], geo[nb]
+    if a == nil or b == nil or a.c == nil or b.c == nil then return p end
+    local along = (math.random() * 2 - 1) * DD.JITTER_ALONG
+    local across = (math.random() * 2 - 1) * DD.JITTER_ACROSS
+    if math.abs(b.c[1] - a.c[1]) >= math.abs(b.c[2] - a.c[2]) then
+        return { p[1] + along, p[2] + across }   -- east-west hallway
+    end
+    return { p[1] + across, p[2] + along }       -- north-south hallway
+end
+
 -- Room path from a to b (both 1..25) along the floor's real exits; {} if a == b, nil if unreachable.
 -- Deep dungeon floors are trees (one route between any two rooms), so a plain search is enough.
 function DD.Path(flags, a, b)
@@ -1724,7 +1945,7 @@ function DD.Waypoints(geo, flags, a, b)
     if path == nil then return nil end
     local pts, cur = {}, a
     for _, nb in ipairs(path) do
-        for _, p in ipairs(DD.Door(geo, cur, nb)) do table.insert(pts, p) end
+        for _, p in ipairs(DD.Door(geo, cur, nb)) do table.insert(pts, DD.Jitter(geo, cur, nb, p)) end
         cur = nb
     end
     return pts
@@ -1791,9 +2012,10 @@ end
 -- hoards at stops it reaches, so they'd skew the odds toward the already-likely spots).
 -- ============================================================
 local SIXTH = CfgBool("SixthSense", false)
--- Search over, still fighting: how long to wait for death (then the normal leave) before SND's
--- forced leave. Sixth Sense: 10s (a single mob can take forever); normal mode: 90s.
-HOH_DEATH_WAIT = SIXTH and 10 or 90
+-- Search over, still fighting: how long to wait for death (then the results screen and the
+-- normal leave) before SND's forced leave, a last resort. 90s in both modes (HeyKupo: dying
+-- cleanly beats a forced leave; Sixth Sense used 10s before, as one mob can take a while).
+HOH_DEATH_WAIT = 90
 local SX = {}   -- Sixth Sense constants (a table: Lua allows only 200 locals per function)
 -- Sixth Sense doesn't leave when attacked or out of Concealment: it keeps going through the
 -- planned stops until the hoard, death, or the end.
@@ -1996,7 +2218,7 @@ local function SixthData(terr)
     if finds > 0 then data.cover = 1 - once / finds end
     local t = LoadTally()[terr]
     if t ~= nil and t.runs >= 200 then data.ph = t.hoard_floors / t.runs end
-    LogI(string.format("Sixth Sense: %d known spots; hoard on %.0f%% of floors, spot list covers ~%.0f%% of hoards", #all, 100 * data.ph, 100 * data.cover))
+    LogI(string.format("Spot data: %d known spots; hoard on %.0f%% of floors, spot list covers ~%.0f%% of hoards", #all, 100 * data.ph, 100 * data.cover))
     sixthCache[terr] = data
     return data
 end
@@ -2014,6 +2236,84 @@ local function SpotRooms(data, tileset, geo)
     data.roomOf[tileset] = m
     LogI(string.format("Sixth Sense: tileset %s: %d spots placed in rooms", tileset, n))
     return m
+end
+
+-- Normal runs, hoard sensed but its marker not loaded (12% of hoard floors). The marker
+-- loads once you're within about 110y of it (every hoard 94-111y from the floor start was
+-- seen at once, every one 112-188y away wasn't), so the hoard is one of the known spots farther
+-- than that, and walking toward it until it's in range is enough. Repeatedly: the spot with the
+-- most finds per yalm still to close, walked to through the hallway points, re-planning as soon
+-- as it's in range; every spot that comes into range without the marker showing is ruled out.
+-- Returns true once found() says the marker has loaded. Global: Explore() comes before this.
+DD.MARKER_RANGE = 100   -- yalms: count a spot as ruled out from this close (a margin under ~110)
+function HOH_EXPLORE_ROOMS(found)
+    local fl = FloorLayout()
+    if fl == nil or fl.floor == nil or fl.floor < 11 or fl.floor > 19 then return false end
+    local geo = HOH11[fl.tileset]
+    if geo == nil then return false end
+    local data = SixthData(Svc.ClientState.TerritoryType)
+    local roomOf = SpotRooms(data, fl.tileset, geo)
+    local flags = {}
+    for i = 1, 25 do flags[i] = fl.rooms[i] or 0 end
+    local R = DD.MARKER_RANGE
+    local function Me() local p = Entity.Player.Position; return p.X, p.Z end
+    local function Room() local ok, r = pcall(function() return InstancedContent.DeepDungeon.CurrentRoomIndex end); return ok and r and r + 1 or nil end
+    local x0, z0 = Me()
+    local cands, total = {}, 0
+    for sp, r in pairs(roomOf) do
+        if flags[r] ~= 0 and (sp.X - x0) ^ 2 + (sp.Z - z0) ^ 2 > R * R then
+            table.insert(cands, { X = sp.X, Y = sp.Y, Z = sp.Z, N = sp.N, room = r }); total = total + sp.N
+        end
+    end
+    local function RuleOut()
+        local x, z = Me()
+        for _, c in ipairs(cands) do
+            if not c.out and (c.X - x) ^ 2 + (c.Z - z) ^ 2 <= R * R then c.out = true end
+        end
+    end
+    local first = true
+    for _ = 1, 12 do
+        if found() then return true end
+        RuleOut()
+        local x, z = Me()
+        local best, bestScore = nil, 0
+        for _, c in ipairs(cands) do
+            if not c.out then
+                local d = math.sqrt((c.X - x) ^ 2 + (c.Z - z) ^ 2) - R
+                local score = c.N / math.max(d, 5)
+                if score > bestScore then best, bestScore = c, score end
+            end
+        end
+        if best == nil then LogD("Explore by spots: no known spot left out of range"); return false end
+        LogD(string.format("Explore by spots: toward a spot in room %d (%.0f%% of the finds still possible), %.0fy to bring it in range",
+            best.room, 100 * best.N / math.max(total, 1), math.sqrt((best.X - x) ^ 2 + (best.Z - z) ^ 2) - R))
+        local pts = {}
+        local cur = Room()
+        if cur ~= nil and cur ~= best.room then pts = DD.Waypoints(geo, flags, cur, best.room) or {} end
+        table.insert(pts, { best.X, best.Z })
+        for _, pnt in ipairs(pts) do
+            if IsDead() then return false end
+            local wy = Entity.Player.Position.Y
+            local ok, np = pcall(function() return IPC.vnavmesh.NearestPoint(V3(pnt[1], wy, pnt[2]), 2, 3) end)
+            local target = (ok and np ~= nil) and np or V3(pnt[1], wy, pnt[2])
+            IPC.vnavmesh.PathfindAndMoveTo(target, false)
+            local t = 0
+            while IPC.vnavmesh.PathfindInProgress() and t < 10 do Wait(0.1); t = t + 0.1 end
+            if first then first = false; Wait(0.4); SpeedUp(target, nil) end
+            t = 0
+            while IPC.vnavmesh.IsRunning() and not IsDead() and DistanceTo(target) > 3 and t < 30 do
+                if found() then IPC.vnavmesh.Stop(); return true end
+                RuleOut()
+                if best.out then break end   -- in range and not there: re-plan
+                Wait(0.25); t = t + 0.25
+            end
+            if found() then IPC.vnavmesh.Stop(); return true end
+            if best.out then break end
+            if t >= 30 then LogD("Explore by spots: no progress"); return false end
+        end
+        best.out = true
+    end
+    return false
 end
 
 -- Visit order from `from` (in room fromRoom), and how many stops to do. Travel between rooms is
@@ -2152,7 +2452,9 @@ function DD.StatusIds()
     return ids
 end
 DD.concealStatus = nil
-SX.CONCEAL_ENEMY = 30    -- first Concealment goes on early if an enemy comes this close before the first hallway
+SX.LEAVE_SECS = 2         -- to start the leave after the search ends (a direct call, no menu), with a second to spare
+SX.RENEW_FOR_PATROL = 15  -- renew early (anywhere) if a patrol is coming and Concealment has less than this left
+SX.CONCEAL_ENEMY = 25    -- first Concealment goes on early if an enemy comes this close before the first hallway
 SX.RENEW_MARGIN = 5      -- renew Concealment at the last hallway that still reaches the next one with this many
                           -- seconds left (as late as possible: each renewal costs time)
 -- Use a Concealment and check it took: a status with ~60s on it appears (or the known one is
@@ -2183,9 +2485,21 @@ function DD.TryConceal()
     if DDX.PomCount(POM.concealment) == 0 then return false end   -- known: none left
     local before = DD.StatusIds()
     local leftBefore = DD.concealStatus ~= nil and DD.StatusLeft(DD.concealStatus) or nil
+    local count = DDX.PomCount(POM.concealment)
     DDX.Use(PomCmd(POM.concealment))
-    Wait(POM_ANIM_SECONDS)
-    for _ = 1, 12 do   -- up to ~4.5s after use (it showed up ~1.5s after in renewals)
+    -- A press during an animation lock (Sprint, a dash) is ignored: if the count hasn't dropped
+    -- after 0.75s, press again (two floors lost 5s waiting on an ignored press, then
+    -- got caught; it went on as Sprint had just been used).
+    local sincePress = 0
+    for _ = 1, 6 do
+        Wait(0.25); sincePress = sincePress + 0.25
+        if DDX.PomCount(POM.concealment) < count then break end
+        if sincePress >= 0.75 then
+            LogD("Concealment didn't register; pressing again")
+            DDX.Use(PomCmd(POM.concealment)); sincePress = 0
+        end
+    end
+    for _ = 1, 12 do   -- up to ~3s more (it showed up ~1.5s after use in renewals)
         if DD.concealStatus ~= nil then
             local l = DD.StatusLeft(DD.concealStatus)
             if l ~= nil and l > 45 and (leftBefore == nil or l > leftBefore + 5) then return true end
@@ -2333,6 +2647,18 @@ local function AttemptSixth()
     -- Hold Concealment back for the first hallway (no traps or stationary enemies there, only the
     -- odd patrol): it goes on mid-hallway, so its ~60s start where the search does.
     local heldConceal = PENDING_CONCEAL
+    -- Checked by SpeedUp before each dash and before Sprint: an enemy close (or a Namazu coming)
+    -- before the first hallway puts the first Concealment on now, before moving faster.
+    DDX.concealHook = function()
+        if heldConceal == nil or STEALTH or InCombat() then return false end
+        local p = Entity.Player.Position
+        local near, why = DDX.ThreatNear(p.X, p.Z, SX.CONCEAL_ENEMY)
+        if not near then return false end
+        LogD("Concealment first: " .. why)
+        STEALTH = DD.TryConceal()
+        if STEALTH or DDX.PomCount(POM.concealment) == 0 then heldConceal = nil end
+        return STEALTH
+    end
     PENDING_CONCEAL = nil
     local hallwayDone = false   -- reached the first hallway (Concealment goes on while walking it)
     local inHallway = false     -- walking a hallway right now (passed its midpoint, not at the stop yet)
@@ -2408,6 +2734,51 @@ local function AttemptSixth()
     local function Tick()
         if IsDead() then return "died" end
         if SixthFound() then return "found" end
+        -- Last protection running out, and nothing left to get out of a fight with (no
+        -- Concealment, no magicite) while stops remain: finish the stop we're headed to only if
+        -- there's time to get there, wait there, and start leaving with a second to spare;
+        -- otherwise leave now, still concealed (searching on unprotected found 4
+        -- hoards in 37 floors and died on 15; a leave, once started, can't be stopped by aggro).
+        if STEALTH and DD.concealStatus ~= nil and not InCombat() and mag.stopX ~= nil then
+            local left = DD.StatusLeft(DD.concealStatus)
+            if left ~= nil and left > 0 and left <= 60 and DDX.PomCount(POM.concealment) == 0
+               and DDX.MagCount(0) == 0 and DDX.MagCount(1) == 0 and DDX.MagCount(2) == 0
+               and order[k] ~= nil and order[k].t - Secs() > left then
+                local p = Entity.Player.Position
+                local d = math.sqrt((mag.stopX - p.X) ^ 2 + (mag.stopZ - p.Z) ^ 2)
+                local need = d * SecsPerYalm() * 1.3 + SX.WAIT + SX.LEAVE_SECS   -- path ~30% longer than straight
+                if left < need then
+                    Event("exit", string.format("leaving with %.0fs of Concealment left (the next stop needs ~%.0fs): none left after it, no magicite",
+                        left, need))
+                    return "unprotected"
+                end
+            end
+        end
+        -- A patrol on its way and Concealment due for renewal soon anyway: renew now, while it's
+        -- still far off (a Namazu walked into the hallway as Concealment was renewed
+        -- there with 8s left; using a pomander drops Concealment for a moment, and it was 3y away).
+        if STEALTH and DD.concealStatus ~= nil and not noConcealLeft and not InCombat()
+           and Secs() - (mag.patrolScan or -1) >= 0.5 then
+            mag.patrolScan = Secs()
+            local left = DD.StatusLeft(DD.concealStatus)
+            if left ~= nil and left > 0 and left < SX.RENEW_FOR_PATROL then
+                local p = Entity.Player.Position
+                local near, why = DDX.ThreatNear(p.X, p.Z, 0, true)   -- a patrol walking toward us
+                -- ...and nothing close by that the moment without Concealment would wake (an
+                -- enemy 6y away did, on an early renewal for a Namazu still 38y off).
+                if near and DDX.PomCount(POM.concealment) > 0 and DDX.NoticedAt(DDX.Enemies(), p.X, p.Z) == nil then
+                    DDX.Use(PomCmd(POM.concealment))
+                    Wait(POM_ANIM_SECONDS)
+                    local after = DD.StatusLeft(DD.concealStatus)
+                    if after ~= nil and after > left + 10 then
+                        concealOn = Secs(); conceals = conceals + 1
+                        Event("concealment", string.format("renewed early with %.0fs left: %s", left, why))
+                    else
+                        Event("concealment", string.format("early renewal didn't take (%.0fs left): %s", left, why))
+                    end
+                end
+            end
+        end
         -- Renew early, in a hallway (only the odd patrol there), rather than mid-room when it runs out.
         if inHallway and STEALTH and DD.concealStatus ~= nil and not noConcealLeft and not InCombat() and DDX.PomCount(POM.concealment) == 0 then
             noConcealLeft = true
@@ -2421,6 +2792,14 @@ local function AttemptSixth()
             if left ~= nil and left > 0 then
                 local eta, rest = NextHall()
                 if eta ~= nil then renew = left - eta < SX.RENEW_MARGIN else renew = left < rest end
+                -- The next one covers the rest of the search anyway: renew here rather than
+                -- stretching this one to the last hallway it can reach. Plan time
+                -- +15%: floors run a little slower than planned.
+                local remaining = order[k] ~= nil and (order[k].t - Secs()) * 1.15 or nil
+                if not renew and remaining ~= nil and left < remaining and remaining <= 60 - SX.RENEW_MARGIN then
+                    renew = true
+                    LogD(string.format("Concealment: %.0fs left, the next one covers the rest (~%.0fs): renewing here", left, remaining))
+                end
                 if not renew then
                     inHallway = false   -- decided for this hallway
                     LogD(string.format("Concealment: %.0fs left, next hallway in ~%s: no renewal here", left,
@@ -2428,6 +2807,20 @@ local function AttemptSixth()
                 end
             end
             if renew then
+                local p = Entity.Player.Position
+                local e, nearest = DDX.NoticedAt(DDX.Enemies(), p.X, p.Z)
+                if e ~= nil then
+                    -- Something would see the moment without Concealment: wait (still in the
+                    -- hallway, checked again next time).
+                    if not mag.renewHeld then
+                        mag.renewHeld = true
+                        Event("concealment", string.format("renewal held: %s %.0fy away (%.0fs left)", e.name, nearest or 0, left))
+                    end
+                    renew = false
+                end
+            end
+            if renew then
+                mag.renewHeld = nil
                 inHallway = false
                 DDX.Use(PomCmd(POM.concealment))
                 Wait(POM_ANIM_SECONDS)
@@ -2450,9 +2843,9 @@ local function AttemptSixth()
         if heldConceal ~= nil and not hallwayDone and Secs() - (mag.concealScan or -1) >= 0.5 then
             mag.concealScan = Secs()
             local p = Entity.Player.Position
-            local n = EnemiesNear(p.X, p.Z, SX.CONCEAL_ENEMY)
-            enemyNear = n > 0
-            if enemyNear then LogD("Enemy within " .. SX.CONCEAL_ENEMY .. "y: Concealment now") end
+            local why
+            enemyNear, why = DDX.ThreatNear(p.X, p.Z, SX.CONCEAL_ENEMY)
+            if enemyNear then LogD("Concealment now: " .. why) end
         end
         if heldConceal ~= nil and (hallwayDone or enemyNear or Secs() > 15) and not InCombat() then
             LogD(string.format("Protection: Pomander of Concealment (first hallway, %.1fs)", Secs()))
