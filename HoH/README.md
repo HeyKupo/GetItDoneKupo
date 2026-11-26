@@ -16,7 +16,7 @@ Farms Accursed Hoards in Heaven-on-High for the 10k / 20k / 30k and Of the Sixth
    ```
    https://github.com/HeyKupo/GetItDoneKupo/blob/main/HoH/HoH_hoard_macro.lua
    ```
-4. **Stand next to Kyusei and start the macro.**
+4. **Stand next to Kyusei and start the macro.** Any job is fine: it switches to your save's job (you need a gearset for it).
 
 For **Of the Sixth Sense**, turn on **SixthSense** first.
 

@@ -177,11 +177,70 @@ local function WaitAddon(name, timeoutSec)
     end
 end
 
-local function EnterWithSave(slot)
-    if MENU_ENTER_CMD == nil or SAVE_SLOT_CMD == nil then
-        error("Deep dungeon menu callbacks not filled in yet")
-    end
+-- The save window shows the job each save was made on, and the game only lets you in on
+-- that job. Gear can't change while the window is open, so on a mismatch: close the
+-- windows, equip the best gearset for the save's job, and talk to Kyusei again.
+-- SND's AtkValues is a yield iterator that luanet.each can't walk; go through the
+-- IEnumerable/IEnumerator interfaces by reflection instead.
+local SAVEWIN = {}   -- reflection handles for walking the save window's values
+pcall(function()
+    local tEnumerable = luanet.ctype(luanet.import_type("System.Collections.IEnumerable"))
+    local tEnumerator = luanet.ctype(luanet.import_type("System.Collections.IEnumerator"))
+    SAVEWIN.getEnum  = tEnumerable:GetMethod("GetEnumerator")
+    SAVEWIN.moveNext = tEnumerator:GetMethod("MoveNext")
+    SAVEWIN.current  = tEnumerator:GetProperty("Current")
+end)
 
+-- Job saved in a slot, or nil (empty slot, or the value can't be read). Slot blocks start
+-- at AtkValue 12, 30 apart; +6 is the job icon (ClassJob id = icon - 62100). Only that one
+-- value is read, by position: the window also holds the character's name.
+local function SavedJob(slot)
+    if SAVEWIN.getEnum == nil then return nil end
+    local want = 12 + 30 * (slot - 1) + 6
+    local ok, job = pcall(function()
+        local e = SAVEWIN.getEnum:Invoke(Addons.GetAddon("DeepDungeonSaveData").AtkValues, nil)
+        local i = 0
+        while SAVEWIN.moveNext:Invoke(e, nil) do
+            if i == want then
+                local icon = tonumber(SAVEWIN.current:GetValue(e).ValueString)
+                if icon and icon > 62100 and icon < 62200 then return icon - 62100 end
+                return nil
+            end
+            i = i + 1
+        end
+        return nil
+    end)
+    return ok and job or nil
+end
+
+-- Highest item level gearset for a job, or nil.
+local function BestGearset(job)
+    local best, bestIl = nil, -1
+    for i = 0, 99 do
+        local g = Player.GetGearset(i)
+        if g.IsValid and g.ClassJob == job and g.ItemLevel > bestIl then best, bestIl = g, g.ItemLevel end
+    end
+    return best
+end
+
+-- -1 is the windows' cancel; Escape only reaches the game while it has focus.
+local function CloseEntryWindows()
+    for _, name in ipairs({ "DeepDungeonSaveData", "DeepDungeonMenu" }) do
+        if AddonReady(name) then yield("/callback " .. name .. " true -1"); yield("/wait 0.5") end
+    end
+    local t = 0
+    while AddonReady("DeepDungeonSaveData") or AddonReady("DeepDungeonMenu") do
+        yield("/wait 0.2"); t = t + 0.2
+        if t >= 5 then error("Couldn't close the deep dungeon windows") end
+    end
+    t = 0
+    while not (Player.Available and not Player.IsBusy) do
+        yield("/wait 0.2"); t = t + 0.2
+        if t >= 10 then break end
+    end
+end
+
+local function OpenSaveWindow()
     -- Find Kyusei by ID, then use the name the game shows for her.
     local npcName = nil
     for obj in luanet.each(Svc.Objects) do
@@ -198,6 +257,32 @@ local function EnterWithSave(slot)
     yield(MENU_ENTER_CMD)
 
     WaitAddon("DeepDungeonSaveData", 10)
+    yield("/wait 0.3")   -- let the slot values fill in
+end
+
+local function EnterWithSave()
+    if MENU_ENTER_CMD == nil or SAVE_SLOT_CMD == nil then
+        error("Deep dungeon menu callbacks not filled in yet")
+    end
+
+    OpenSaveWindow()
+    local saved = SavedJob(SAVE_SLOT)
+    if saved ~= nil and saved ~= Player.Job.Id then
+        local name = Player.GetJob(saved).Name
+        local g = BestGearset(saved)
+        CloseEntryWindows()
+        if g == nil then error("Save file " .. SAVE_SLOT .. " is " .. name .. ", but there's no gearset for it.") end
+        g:Equip()
+        local t = 0
+        while Player.Job.Id ~= saved do
+            yield("/wait 0.2"); t = t + 0.2
+            if t >= 10 then error("Couldn't change to " .. name) end
+        end
+        yield("/echo [HoH] Save file " .. SAVE_SLOT .. " is " .. name .. "; switched gearset.")
+        LogI("Changed job to " .. name .. " for save file " .. SAVE_SLOT)
+        yield("/wait 1")
+        OpenSaveWindow()
+    end
     yield(SAVE_SLOT_CMD)
 
     WaitAddon("ContentsFinderConfirm", 60)
