@@ -1,7 +1,7 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.3.1
+version: 1.4.0
 description: HoH hoard farm, loaded by the HoH_hoard macro (which SND downloads it for as a dependency). Enter on a save, use Intuition, take the hoard if it's on the floor, leave, repeat. Leaving doesn't change the save.
 [[End Metadata]]
 --]=====]
@@ -13,6 +13,48 @@ function HoH_Main()
 -- Logging: essentials at Info; details at Debug (set Dalamud's log level to Debug in /xllog to see them).
 local function LogI(msg) Dalamud.Log("[HoH] " .. msg) end
 local function LogD(msg) Dalamud.LogDebug("[HoH] " .. msg) end
+
+-- Chat lines: [HoH] tag and numbers in colour, built as a chat entry (printing a coloured line
+-- with a separate tag shows nothing from Lua). Falls back to a plain tagged line, then /echo.
+-- In the text, "{67|4846/5000}" is a piece in colour 67; other numbers get CHAT.NUM.
+local CHAT = { TAG = 500, NUM = 67, RED = 17, YELLOW = 25, GREEN = 67, EARNED = 45 }   -- UIColor ids
+-- Colour for how far along something is (0-1): red below a third, yellow below two thirds, green.
+function CHAT.Band(f) return f < 1 / 3 and CHAT.RED or f < 2 / 3 and CHAT.YELLOW or CHAT.GREEN end
+function CHAT.C(color, text) return "{" .. color .. "|" .. text .. "}" end
+local function Say(text)
+    local ok = pcall(function()
+        luanet.load_assembly("Dalamud")
+        local b = luanet.import_type("Dalamud.Game.Text.SeStringHandling.SeStringBuilder")()
+        b:AddUiForeground("[HoH] ", CHAT.TAG)
+        local function plain(t)   -- text with its numbers in CHAT.NUM
+            local pos = 1
+            while true do
+                local s, e = string.find(t, "%d[%d,/%%]*", pos)
+                if s == nil then break end
+                if s > pos then b:AddText(string.sub(t, pos, s - 1)) end
+                b:AddUiForeground(string.sub(t, s, e), CHAT.NUM)
+                pos = e + 1
+            end
+            if pos <= #t then b:AddText(string.sub(t, pos)) end
+        end
+        local pos = 1
+        while true do
+            local s, e, color, piece = string.find(text, "{(%d+)|([^}]*)}", pos)
+            if s == nil then break end
+            if s > pos then plain(string.sub(text, pos, s - 1)) end
+            b:AddUiForeground(piece, tonumber(color))
+            pos = e + 1
+        end
+        if pos <= #text then plain(string.sub(text, pos)) end
+        local entry = luanet.import_type("Dalamud.Game.Text.XivChatEntry")()
+        entry.Message = b:Build()
+        entry.Type = luanet.import_type("Dalamud.Game.Text.XivChatType").Echo
+        Svc.Chat:Print(entry)
+    end)
+    text = string.gsub(text, "{%d+|([^}]*)}", "%1")
+    if not ok then ok = pcall(function() Svc.Chat:Print(text, "HoH", CHAT.TAG) end) end
+    if not ok then yield("/echo [HoH] " .. text) end
+end
 
 -- Intuition's result comes as a chat message. Its text is taken from the game's message table
 -- (LogMessage 7272 = hoard, 7273 = no hoard) in the client's language. Parts of a message that
@@ -34,7 +76,8 @@ local SENSE_YES = FixedPiece(LogMessageText(7272)) or "You sense the Accursed Ho
 local SENSE_NO  = FixedPiece(LogMessageText(7273)) or "You do not sense the call of the Accursed Hoard"
 local DISCOVERED = FixedPiece(LogMessageText(7274)) or "You discover a piece of the Accursed Hoard"
 -- The last hoard achievements: the script stops when the "... earns the achievement ..." chat
--- line for its mode's one comes (it's shown only once, so a restart just keeps going).
+-- line for its mode's one comes, or when the mode's hoard count (HC, below) reaches it; it
+-- doesn't start once the count shows the achievement earned. StopOnAchievement off: keeps going.
 -- Sixth Sense: The Trouble with Buried II (1666, title Of the Sixth Sense). Normal: For the
 -- Hoard VII (3816, 30,000 hoards). Names from the game data, in the client's language.
 local function AchievementName(id, fallback)
@@ -54,6 +97,7 @@ local TEST_ACHIEVEMENT = AchievementName(1664, "For the Hoard IV")
 -- Called by the macro's OnChatMessage (SND only hooks trigger functions written in the macro).
 function HoH_OnChat(msg)
     if type(msg) ~= "string" then return end
+    if string.find(msg, "[HoH]", 1, true) then return end   -- our own chat lines name the achievement too
     if string.find(msg, SENSE_NO, 1, true) then HOH_SENSE = "no"
     elseif string.find(msg, SENSE_YES, 1, true) then HOH_SENSE = "yes"
     elseif string.find(msg, DISCOVERED, 1, true) then HOH_DISCOVERED = true end
@@ -278,7 +322,7 @@ local function EnterWithSave()
             yield("/wait 0.2"); t = t + 0.2
             if t >= 10 then error("Couldn't change to " .. name) end
         end
-        yield("/echo [HoH] Save file " .. SAVE_SLOT .. " is " .. name .. "; switched gearset.")
+        Say("Save file " .. SAVE_SLOT .. " is " .. name .. "; switched gearset.")
         LogI("Changed job to " .. name .. " for save file " .. SAVE_SLOT)
         yield("/wait 1")
         OpenSaveWindow()
@@ -3331,6 +3375,130 @@ local function AttemptSixth()
 end
 
 -- ============================================================
+-- Hoard counts, kept in the macro's Achievement Progress settings (ForTheHoard, TroubleWithBuried;
+-- 0 = not known yet). Chat lines show the running mode's one with the next achievement in its series. Added to
+-- as hoards are found (every hoard counts for For the Hoard; only ones found without Intuition
+-- for The Trouble with Buried). Now and then they're checked against the achievements' own
+-- counts (Player.Achievements, SND 15.16+): when a count isn't known yet, about one session
+-- in ten, and every session near the mode's last achievement.
+-- ============================================================
+local HC = { CHECK_ONE_IN = 10, session = 0, runs = 0, stop = CfgBool("StopOnAchievement", true) }
+HC.tracks = {
+    hoard = { key = "ForTheHoard", near = 200, steps = {
+        { 1661, 1, "For the Hoard I" }, { 1662, 100, "For the Hoard II" }, { 1663, 1000, "For the Hoard III" },
+        { 1664, 5000, "For the Hoard IV" }, { 2056, 10000, "For the Hoard V" }, { 3184, 20000, "For the Hoard VI" },
+        { 3816, 30000, "For the Hoard VII" } } },
+    sixth = { key = "TroubleWithBuried", near = 10, steps = {
+        { 1665, 1, "The Trouble with Buried I" }, { 1666, 100, "The Trouble with Buried II" } } },
+}
+for _, tr in pairs(HC.tracks) do
+    for _, st in ipairs(tr.steps) do st[3] = AchievementName(st[1], st[3]) end
+    tr.last = tr.steps[#tr.steps]
+    local ok, v = pcall(function() return Config.GetInt(tr.key, 0) end)
+    tr.count = ok and v > 0 and v or nil   -- nil = not known
+end
+HC.mine = SIXTH and HC.tracks.sixth or HC.tracks.hoard   -- the one whose last achievement stops the script
+
+function HC.Text(tr)
+    if tr.count == nil then return nil end
+    for _, st in ipairs(tr.steps) do
+        -- count in its progress colour, the requirement in EARNED; the find that earns one shows
+        -- the count in EARNED too, before the line moves on to the next achievement
+        if tr.count == st[2] then return string.format("%s (%s/%s)", st[3], CHAT.C(CHAT.EARNED, tr.count), CHAT.C(CHAT.EARNED, st[2])) end
+        if tr.count < st[2] then
+            return string.format("%s (%s/%s)", st[3], CHAT.C(CHAT.Band(tr.count / st[2]), tr.count), CHAT.C(CHAT.EARNED, st[2]))
+        end
+    end
+    return string.format("%s (%s/%s, complete)", tr.last[3], CHAT.C(CHAT.EARNED, tr.count), CHAT.C(CHAT.EARNED, tr.last[2]))
+end
+
+function HC.Save(tr, n)
+    tr.count = math.floor(n)
+    pcall(function() Config.Set(tr.key, tr.count) end)   -- SND saves it with the macro
+end
+
+-- An achievement's own count, or nil (older SND, or no answer from the server).
+function HC.Fetch(id)
+    local ok, ach = pcall(function() return Player.Achievements end)
+    if not ok or ach == nil then return nil end
+    local got = nil
+    pcall(function()
+        local t = 0
+        while not ach:RequestProgress(id) do
+            yield("/wait 0.5"); t = t + 0.5
+            if t >= 6 then return end
+        end
+        t = 0
+        while t < 5 do
+            yield("/wait 0.2"); t = t + 0.2
+            local pr = ach.Progress
+            if pr.IsLoaded and pr.Id == id then got = tonumber(pr.Current); return end
+        end
+    end)
+    return got
+end
+
+function HC.Sync()
+    local due = math.random(HC.CHECK_ONE_IN) == 1
+    for _, tr in pairs(HC.tracks) do
+        if tr.count == nil then due = true end
+    end
+    local m = HC.mine
+    if m.count ~= nil and m.count < m.last[2] and m.count >= m.last[2] - m.near then due = true end
+    if not due then return end
+    for _, tr in pairs(HC.tracks) do
+        local n = HC.Fetch(tr.last[1])
+        -- A completed achievement's count stays at its requirement; past it, ours is the better one.
+        if n ~= nil and n == tr.last[2] and tr.count ~= nil and tr.count > n then n = nil end
+        if n ~= nil then
+            if n ~= tr.count then LogI(string.format("%s: had %s, the achievement says %d", tr.key, tostring(tr.count), n)) end
+            HC.Save(tr, n)
+        end
+    end
+end
+
+-- "find rate 50% (1/2)": hoards found over runs this session.
+-- Coloured against the usual rate for the mode, from the run tally (all sessions): green at or
+-- above one standard deviation below it (for this many runs), yellow down to two, red below.
+function HC.Rate()
+    if HC.usual == nil then
+        local runs, taken = 0, 0
+        for terr, t in pairs(LoadTally()) do
+            if (terr >= SX.TALLY_OFFSET) == SIXTH then runs = runs + (t.runs or 0); taken = taken + (t.taken or 0) end
+        end
+        HC.usual = runs >= 100 and taken / runs or (SIXTH and 0.33 or 0.48)
+    end
+    local rate = HC.runs > 0 and HC.session / HC.runs or 0
+    local p = HC.usual
+    local sd = math.sqrt(p * (1 - p) / math.max(HC.runs, 1))
+    local color = rate >= p - sd and CHAT.GREEN or rate >= p - 2 * sd and CHAT.YELLOW or CHAT.RED
+    return string.format("find rate %s (%s)", CHAT.C(color, math.floor(100 * rate + 0.5) .. "%"),
+        CHAT.C(color, HC.session .. "/" .. HC.runs))
+end
+
+function HC.Line() return HC.Text(HC.mine) end   -- chat shows the running mode's count
+
+-- A hoard was found. Returns true when it's the one that earns the mode's last achievement.
+function HC.Found()
+    HC.session = HC.session + 1
+    local h, x = HC.tracks.hoard, HC.tracks.sixth
+    if h.count ~= nil then HC.Save(h, h.count + 1) end
+    if SIXTH and x.count ~= nil then HC.Save(x, x.count + 1) end
+    local t = HC.Line()
+    Say(string.format("Hoard found: %s%s", HC.Rate(), t and (" \u{00B7} " .. t) or ""))
+    return HC.stop and HC.mine.count == HC.mine.last[2]
+end
+
+-- Session report, once: from the macro's OnStop (which SND runs however the macro ends), or at
+-- the end of the script for a macro without one.
+function HoH_OnStop()
+    if HC.reported then return end
+    HC.reported = true
+    local t = HC.Line()
+    Say(string.format("Session: %s%s", HC.Rate(), t and (" \u{00B7} " .. t) or ""))
+end
+
+-- ============================================================
 -- Main
 -- ============================================================
 local hoards, missed, unseen, deaths = 0, 0, 0, 0
@@ -3338,6 +3506,14 @@ LogD("Landing check (vnavmesh): " .. (V3 ~= nil and "available" or "unavailable"
 LogI(string.format("Starting: %s runs, save file %d", MAX_RUNS == math.huge and "unlimited" or tostring(MAX_RUNS), SAVE_SLOT))
 if RECORD_SPOTS then LogSpotStats("Spot log: ") end
 LogTally("Run tally: ")
+HC.Sync()
+if HC.Line() then Say(HC.Line()) end
+if HC.stop and HC.mine.count ~= nil and HC.mine.count >= HC.mine.last[2] then
+    Say(HC.mine.last[3] .. " is already earned: stopping.")
+    LogI("Already earned " .. HC.mine.last[3] .. ": stopping")
+    HC.reported = true   -- nothing to report
+    return
+end
 if SIXTH then
     LogI(string.format("Sixth Sense ON: no Intuition; protection %s, Safety %s; combat check: %s",
         PROTECTION_CHOICE, tostring(USE_SAFETY),
@@ -3360,6 +3536,8 @@ for i = 1, MAX_RUNS do
     -- the script during the leave doesn't leave a discovery the game counted but the tally didn't.
     local diedInRun = IsDead()
     CountRun(tallyTerr, SIXTH and (result == "taken" and "taken" or "none") or result, diedInRun)
+    HC.runs = i
+    local completed = result == "taken" and HC.Found()
     if result == "taken" then hoards = hoards + 1 elseif result == "missed" then missed = missed + 1 elseif result == "unseen" then unseen = unseen + 1 end
     if not SIXTH then NormalCombatCheck() end   -- rule 1: end combat so the normal leave works
     local died = LeaveDuty()
@@ -3370,7 +3548,7 @@ for i = 1, MAX_RUNS do
     end
     LogI(string.format("Run %d done, hoards taken: %d, missed: %d, sensed-not-found: %d, deaths: %d", i, hoards, missed, unseen, deaths))
     local goal = SIXTH and "sixth" or "normal"
-    if HOH_EARNED[goal] then
+    if (HC.stop and HOH_EARNED[goal]) or completed then
         LogI("Earned " .. GOAL_ACHIEVEMENT[goal] .. ": stopping")
         break
     end
@@ -3379,6 +3557,7 @@ end
 if RECORD_SPOTS then LogSpotStats("Spot log: ") end
 LogTally("Run tally: ")
 LogI(string.format("Finished: %d hoards taken, %d missed, %d sensed-not-found, %d deaths", hoards, missed, unseen, deaths))
+HoH_OnStop()
 collectgarbage("collect")
 collectgarbage("collect")
 end

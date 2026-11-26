@@ -10,7 +10,7 @@ Farms Accursed Hoards in Heaven-on-High for the 10k / 20k / 30k and Of the Sixth
 
    *Tips*: Use Affluences on floors 6-8, Fortunes on 7-9, unless they cap earlier. A job with a forward dash is a little faster: PCT, DNC, WHM or RPR.  Spend other poms freely to make it easy on yourself!
    
-2. **Install** [SomethingNeedDoing](https://github.com/Jaksuhn/SomethingNeedDoing) (15.15 or later) and [vnavmesh](https://github.com/awgil/ffxiv_navmesh).
+2. **Install** [SomethingNeedDoing](https://github.com/Jaksuhn/SomethingNeedDoing) (15.16 or later) and [vnavmesh](https://github.com/awgil/ffxiv_navmesh).
 
 3. **Add the macro.** In SND, click **New Macro**, set **Type** to **Lua**, paste this URL under **Import from Github**, and click **Create**:
    ```
@@ -26,7 +26,8 @@ For **Of the Sixth Sense**, turn on **SixthSense** first.
 - **Sixth Sense:** enter, check the likeliest spots, leave, repeat. About 15 hoards an hour.
 - Your save never runs down: you go back in with the same pomanders every time.
 - Pomanders and magicites are used automatically: Concealment until something attacks, then magicite.
-- Stops by itself when you earn the achievements: For the Hoard VII (30,000 hoards) in normal mode, The Trouble with Buried II in Sixth Sense.
+- Chat shows your find rate and progress to the next achievement after every hoard, and a summary when you stop.
+- Stops by itself when you earn the achievements: For the Hoard VII (30,000 hoards) in normal mode, The Trouble with Buried II in Sixth Sense. Turn off **StopOnAchievement** to keep going.
 - Made for floor 11 saves. Other floors may work. YMMV.
 
 ## Settings
@@ -36,6 +37,9 @@ For **Of the Sixth Sense**, turn on **SixthSense** first.
 | SaveSlot | 1 | Which save file to use (1 or 2). |
 | Runs | 100 | Stop after this many runs. 0 = until you stop it. |
 | SixthSense | off | Search without Intuition, for Of the Sixth Sense. |
+| ForTheHoard | 0 | Your hoard count. Kept up by the script and checked against your achievements now and then. |
+| TroubleWithBuried | 0 | Same, for hoards found without Intuition. |
+| StopOnAchievement | on | Stop when the mode's last achievement is earned. |
 | RecordSpots | off | Development. Leave it off. |
 | ScriptPath | *(empty)* | Development. Leave it empty. |
 
