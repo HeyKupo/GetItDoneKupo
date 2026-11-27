@@ -1,7 +1,7 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.4.0
+version: 1.4.1
 description: HoH hoard farm, loaded by the HoH_hoard macro (which SND downloads it for as a dependency). Enter on a save, use Intuition, take the hoard if it's on the floor, leave, repeat. Leaving doesn't change the save.
 [[End Metadata]]
 --]=====]
@@ -2075,19 +2075,25 @@ end
 function HOH_WALK(wps, hoardPos, onTick)
     for i, w in ipairs(wps) do
         if IsDead() then return end
+        -- Waypoints have no height; stairs between hallway and room can put the next one several
+        -- yalms above or below us, so look for the mesh well up and down (a point off the mesh
+        -- sent vnavmesh into a wall at the foot of some stairs).
         local wy = Entity.Player.Position.Y
-        local ok, pt = pcall(function() return IPC.vnavmesh.NearestPoint(V3(w[1], wy, w[2]), 2, 3) end)
+        local ok, pt = pcall(function() return IPC.vnavmesh.NearestPoint(V3(w[1], wy, w[2]), 2, 10) end)
         local target = (ok and pt ~= nil) and pt or V3(w[1], wy, w[2])
         IPC.vnavmesh.PathfindAndMoveTo(target, false)
         local t = 0
         while IPC.vnavmesh.PathfindInProgress() and t < 10 do Wait(0.1); t = t + 0.1 end
         if i == 1 then Wait(0.4); SpeedUp(target, hoardPos) end
         t = 0
+        local stuck = StuckWatcher(target)
         -- Move on to the next doorway when close, without stopping.
         while IPC.vnavmesh.IsRunning() and not IsDead() and DistanceTo(target) > 3 and t < 30 do
             Wait(0.25); t = t + 0.25
             TimerTick()
             if onTick ~= nil then onTick() end
+            -- stuck twice in the same place: give up on the doorways, go straight to the hoard
+            if stuck(0.25) >= 2 then LogD("Doorway route: stuck, going straight to the hoard"); return end
         end
         if t >= 30 then LogD("Doorway route: no progress, going straight to the hoard"); return end
     end
