@@ -17,10 +17,14 @@ local function LogD(msg) Dalamud.LogDebug("[HoH] " .. msg) end
 -- Chat lines: [HoH] tag and numbers in colour, built as a chat entry (printing a coloured line
 -- with a separate tag shows nothing from Lua). Falls back to a plain tagged line, then /echo.
 -- In the text, "{67|4846/5000}" is a piece in colour 67; other numbers get CHAT.NUM.
-local CHAT = { TAG = 500, NUM = 67, RED = 17, YELLOW = 25, GREEN = 67, EARNED = 45 }   -- UIColor ids
--- Colour for how far along something is (0-1): red below a third, yellow below two thirds, green.
-function CHAT.Band(f) return f < 1 / 3 and CHAT.RED or f < 2 / 3 and CHAT.YELLOW or CHAT.GREEN end
+local CHAT = { TAG = 500, NUM = 67, RED = 17, YELLOW = 25, GREEN = 67, EARNED = 45,   -- UIColor ids
+               STEPS = { 17, 15, 25, 61, 67 },   -- progress colours, by fifths (100% is EARNED)
+               NAME = 500 }                       -- achievement names: same as the [HoH] tag
+-- Colour for how far along something is (0-1): red, orange, yellow, yellow-green, green by fifths.
+function CHAT.Band(f) return CHAT.STEPS[math.max(1, math.min(5, math.floor(f * 5) + 1))] end
 function CHAT.C(color, text) return "{" .. color .. "|" .. text .. "}" end
+-- Achievement names. (Italics and outlines exist too, but Chat 2 shows neither.)
+function CHAT.I(text) return CHAT.C(CHAT.NAME, text) end
 local function Say(text)
     local ok = pcall(function()
         luanet.load_assembly("Dalamud")
@@ -39,10 +43,11 @@ local function Say(text)
         end
         local pos = 1
         while true do
-            local s, e, color, piece = string.find(text, "{(%d+)|([^}]*)}", pos)
+            local s, e, color, piece = string.find(text, "{(%w+)|([^}]*)}", pos)
             if s == nil then break end
             if s > pos then plain(string.sub(text, pos, s - 1)) end
-            b:AddUiForeground(piece, tonumber(color))
+            if color == "i" then b:AddItalicsOn(); b:AddText(piece); b:AddItalicsOff()
+            else b:AddUiForeground(piece, tonumber(color)) end
             pos = e + 1
         end
         if pos <= #text then plain(string.sub(text, pos)) end
@@ -51,7 +56,7 @@ local function Say(text)
         entry.Type = luanet.import_type("Dalamud.Game.Text.XivChatType").Echo
         Svc.Chat:Print(entry)
     end)
-    text = string.gsub(text, "{%d+|([^}]*)}", "%1")
+    text = string.gsub(text, "{%w+|([^}]*)}", "%1")
     if not ok then ok = pcall(function() Svc.Chat:Print(text, "HoH", CHAT.TAG) end) end
     if not ok then yield("/echo [HoH] " .. text) end
 end
@@ -75,42 +80,28 @@ end
 local SENSE_YES = FixedPiece(LogMessageText(7272)) or "You sense the Accursed Hoard calling you"
 local SENSE_NO  = FixedPiece(LogMessageText(7273)) or "You do not sense the call of the Accursed Hoard"
 local DISCOVERED = FixedPiece(LogMessageText(7274)) or "You discover a piece of the Accursed Hoard"
--- The last hoard achievements: the script stops when the "... earns the achievement ..." chat
--- line for its mode's one comes, or when the mode's hoard count (HC, below) reaches it; it
--- doesn't start once the count shows the achievement earned. StopOnAchievement off: keeps going.
--- Sixth Sense: The Trouble with Buried II (1666, title Of the Sixth Sense). Normal: For the
--- Hoard VII (3816, 30,000 hoards). Names from the game data, in the client's language.
+-- Achievement names come from the game data, in the client's language (see HC, below).
 local function AchievementName(id, fallback)
     local ok, v = pcall(function() return Excel.GetRow("Achievement", id):GetProperty("Name") end)
     return ok and v ~= nil and tostring(v) ~= "" and tostring(v) or fallback
 end
-local GOAL_ACHIEVEMENT = { sixth = AchievementName(1666, "The Trouble with Buried II"),
-                           normal = AchievementName(3816, "For the Hoard VII") }
-LogD(string.format("Matching chat: hoard = \"%s\", no hoard = \"%s\", discovered = \"%s\", achievements = \"%s\", \"%s\"",
-    SENSE_YES, SENSE_NO, DISCOVERED, GOAL_ACHIEVEMENT.normal, GOAL_ACHIEVEMENT.sixth))
+LogD(string.format("Matching chat: hoard = \"%s\", no hoard = \"%s\", discovered = \"%s\"",
+    SENSE_YES, SENSE_NO, DISCOVERED))
 HOH_DISCOVERED = false
-HOH_EARNED = {}   -- "sixth" / "normal" = true once its achievement's chat line has come
--- Check: For the Hoard IV (1664, 5,000 hoards): its chat
--- line is logged (no stop) to confirm SND passes achievement lines on. Remove once seen.
-local TEST_ACHIEVEMENT = AchievementName(1664, "For the Hoard IV")
 
 -- Called by the macro's OnChatMessage (SND only hooks trigger functions written in the macro).
 function HoH_OnChat(msg)
     if type(msg) ~= "string" then return end
-    if string.find(msg, "[HoH]", 1, true) then return end   -- our own chat lines name the achievement too
+    if string.find(msg, "[HoH]", 1, true) then return end   -- our own chat lines
     if string.find(msg, SENSE_NO, 1, true) then HOH_SENSE = "no"
     elseif string.find(msg, SENSE_YES, 1, true) then HOH_SENSE = "yes"
     elseif string.find(msg, DISCOVERED, 1, true) then HOH_DISCOVERED = true end
-    if string.find(msg, TEST_ACHIEVEMENT, 1, true) then LogI("TEST achievement chat line seen: " .. msg) end
-    for mode, name in pairs(GOAL_ACHIEVEMENT) do
-        if string.find(msg, name, 1, true) then HOH_EARNED[mode] = true end
-    end
 end
 
 -- ============================================================
 -- Config
 -- ============================================================
-local ENTRY_NPC_ID     = 1025846       -- Kyusei, the HoH entrance NPC; start the script standing next to them
+local ENTRY_NPC_ID     = 1025846       -- Kyusei, the HoH entrance NPC (the script goes to her if you start elsewhere)
 
 -- Everything is looked up by ID, and text comes from the game's own data (which is in the
 -- client's language), so the script works on any client language.
@@ -3378,9 +3369,9 @@ end
 -- Hoard counts, kept in the macro's Achievement Progress settings (ForTheHoard, TroubleWithBuried;
 -- 0 = not known yet). Chat lines show the running mode's one with the next achievement in its series. Added to
 -- as hoards are found (every hoard counts for For the Hoard; only ones found without Intuition
--- for The Trouble with Buried). Now and then they're checked against the achievements' own
--- counts (Player.Achievements, SND 15.16+): when a count isn't known yet, about one session
--- in ten, and every session near the mode's last achievement.
+-- for The Trouble with Buried). At the start of a session, the running mode's count is now and
+-- then checked against its achievement (Player.Achievements, SND 15.16+): when it isn't known
+-- yet, about one session in ten, and every session near the mode's last achievement.
 -- ============================================================
 local HC = { CHECK_ONE_IN = 10, session = 0, runs = 0, stop = CfgBool("StopOnAchievement", true) }
 HC.tracks = {
@@ -3404,12 +3395,12 @@ function HC.Text(tr)
     for _, st in ipairs(tr.steps) do
         -- count in its progress colour, the requirement in EARNED; the find that earns one shows
         -- the count in EARNED too, before the line moves on to the next achievement
-        if tr.count == st[2] then return string.format("%s (%s/%s)", st[3], CHAT.C(CHAT.EARNED, tr.count), CHAT.C(CHAT.EARNED, st[2])) end
+        if tr.count == st[2] then return string.format("%s (%s/%s)", CHAT.I(st[3]), CHAT.C(CHAT.EARNED, tr.count), CHAT.C(CHAT.EARNED, st[2])) end
         if tr.count < st[2] then
-            return string.format("%s (%s/%s)", st[3], CHAT.C(CHAT.Band(tr.count / st[2]), tr.count), CHAT.C(CHAT.EARNED, st[2]))
+            return string.format("%s (%s/%s)", CHAT.I(st[3]), CHAT.C(CHAT.Band(tr.count / st[2]), tr.count), CHAT.C(CHAT.EARNED, st[2]))
         end
     end
-    return string.format("%s (%s/%s, complete)", tr.last[3], CHAT.C(CHAT.EARNED, tr.count), CHAT.C(CHAT.EARNED, tr.last[2]))
+    return string.format("%s (%s/%s, complete)", CHAT.I(tr.last[3]), CHAT.C(CHAT.EARNED, tr.count), CHAT.C(CHAT.EARNED, tr.last[2]))
 end
 
 function HC.Save(tr, n)
@@ -3438,22 +3429,17 @@ function HC.Fetch(id)
     return got
 end
 
-function HC.Sync()
-    local due = math.random(HC.CHECK_ONE_IN) == 1
-    for _, tr in pairs(HC.tracks) do
-        if tr.count == nil then due = true end
-    end
+function HC.Sync()   -- once, at the start of a session: the running mode's count only
     local m = HC.mine
-    if m.count ~= nil and m.count < m.last[2] and m.count >= m.last[2] - m.near then due = true end
+    local due = m.count == nil or math.random(HC.CHECK_ONE_IN) == 1
+        or (m.count < m.last[2] and m.count >= m.last[2] - m.near)
     if not due then return end
-    for _, tr in pairs(HC.tracks) do
-        local n = HC.Fetch(tr.last[1])
-        -- A completed achievement's count stays at its requirement; past it, ours is the better one.
-        if n ~= nil and n == tr.last[2] and tr.count ~= nil and tr.count > n then n = nil end
-        if n ~= nil then
-            if n ~= tr.count then LogI(string.format("%s: had %s, the achievement says %d", tr.key, tostring(tr.count), n)) end
-            HC.Save(tr, n)
-        end
+    local n = HC.Fetch(m.last[1])
+    -- A completed achievement's count stays at its requirement; past it, ours is the better one.
+    if n ~= nil and n == m.last[2] and m.count ~= nil and m.count > n then n = nil end
+    if n ~= nil then
+        if n ~= m.count then LogI(string.format("%s: had %s, the achievement says %d", m.key, tostring(m.count), n)) end
+        HC.Save(m, n)
     end
 end
 
@@ -3492,6 +3478,7 @@ end
 -- Session report, once: from the macro's OnStop (which SND runs however the macro ends), or at
 -- the end of the script for a macro without one.
 function HoH_OnStop()
+    pcall(function() IPC.vnavmesh.Stop() end)   -- don't leave a walk or flight running
     if HC.reported then return end
     HC.reported = true
     local t = HC.Line()
@@ -3509,7 +3496,7 @@ LogTally("Run tally: ")
 HC.Sync()
 if HC.Line() then Say(HC.Line()) end
 if HC.stop and HC.mine.count ~= nil and HC.mine.count >= HC.mine.last[2] then
-    Say(HC.mine.last[3] .. " is already earned: stopping.")
+    Say(CHAT.I(HC.mine.last[3]) .. " is already earned: stopping.")
     LogI("Already earned " .. HC.mine.last[3] .. ": stopping")
     HC.reported = true   -- nothing to report
     return
@@ -3519,6 +3506,123 @@ if SIXTH then
         PROTECTION_CHOICE, tostring(USE_SAFETY),
         (function() local ok, v = pcall(function() return tostring(Svc.Objects.LocalPlayer.StatusFlags) end) return ok and v or "unavailable" end)()))
 end
+-- Start anywhere. Next to Kyusei: nothing to do. In the Ruby Sea and no more than FLY_EXTRA
+-- further from her than the Onokoro aetheryte is: go straight to her. Otherwise teleport to
+-- Onokoro first. Trips longer than MOUNT_FROM are mounted (flown when possible) and end with a
+-- landing in front of her; shorter ones go on the ground.
+local function GoToKyusei()
+    if InDeepDungeon() then return end
+    local RUBY_SEA, ONOKORO, MOUNT_FROM, FLY_EXTRA = 613, 106, 30, 300   -- TerritoryType, Aetheryte, yalms, yalms
+    local KYUSEI_AT = { X = -2.0, Y = 3.0, Z = -611.4 }   -- where she stands, for when she isn't loaded
+    local function Kyusei()   -- her position and facing, or nil when she isn't loaded
+        local pos, rot = nil, nil
+        for obj in luanet.each(Svc.Objects) do
+            if obj ~= nil and obj.BaseId == ENTRY_NPC_ID then pos = obj.Position; rot = obj.Rotation; break end
+        end
+        collectgarbage("collect")
+        collectgarbage("collect")
+        return pos, rot
+    end
+    local function Dist(p)
+        local me = Entity.Player.Position
+        return math.sqrt((p.X - me.X) ^ 2 + (p.Z - me.Z) ^ 2)
+    end
+    local function Free() return Player.Available and not Player.IsBusy end
+    local function Until(pred, secs, what)
+        local t = 0
+        while not pred() do
+            yield("/wait 0.2"); t = t + 0.2
+            if t >= secs then error("Timed out waiting for " .. what) end
+        end
+    end
+    local function Travel(target, near, fly)   -- fly: nil = by distance
+        if Dist(target) > MOUNT_FROM and Player.CanMount and not InCombat() and not Entity.Player.IsMounted then
+            Actions.ExecuteGeneralAction(9)   -- Mount Roulette
+            local t = 0
+            while not Entity.Player.IsMounted and t < 6 do yield("/wait 0.2"); t = t + 0.2 end
+        end
+        -- after a teleport vnavmesh loads the zone's mesh first; a path asked for before then goes nowhere
+        if not IPC.vnavmesh.IsReady() then Say("Waiting for vnavmesh to load the Ruby Sea.") end
+        Until(function() return IPC.vnavmesh.IsReady() end, 120, "vnavmesh to load the Ruby Sea")
+        -- short trips stay on the ground (mounted or not); longer ones fly when possible
+        if fly == nil then fly = Dist(target) > MOUNT_FROM end
+        fly = fly and Entity.Player.IsMounted and Player.CanFly
+        for _ = 1, 3 do   -- ask again if the path doesn't start
+            IPC.vnavmesh.PathfindAndMoveTo(target, fly)
+            local t = 0
+            yield("/wait 0.2")
+            while t < 10 and IPC.vnavmesh.PathfindInProgress() do yield("/wait 0.2"); t = t + 0.2 end
+            if IPC.vnavmesh.IsRunning() or Dist(target) <= near then break end
+            yield("/wait 1")
+        end
+        -- stop by straight-line distance, height included: a flight that's above her isn't there yet
+        local function Dist3()
+            local me = Entity.Player.Position
+            return math.sqrt((target.X - me.X) ^ 2 + (target.Y - me.Y) ^ 2 + (target.Z - me.Z) ^ 2)
+        end
+        local t = 0
+        while t < 180 and Dist3() > near and (IPC.vnavmesh.PathfindInProgress() or IPC.vnavmesh.IsRunning()) do
+            yield("/wait 0.2"); t = t + 0.2
+        end
+        IPC.vnavmesh.Stop()
+    end
+
+    local pos = Kyusei()
+    if pos ~= nil and Dist(pos) < 4 then return end
+    if pos == nil and Territory() == RUBY_SEA then
+        local fromAetheryte = 93   -- measured; replaced by the game's own position below if it gives one
+        pcall(function()
+            local a = Instances.Telepo:GetAetherytePosition(ONOKORO)
+            fromAetheryte = math.sqrt((a.X - KYUSEI_AT.X) ^ 2 + (a.Z - KYUSEI_AT.Z) ^ 2)
+        end)
+        if Dist(KYUSEI_AT) <= fromAetheryte + FLY_EXTRA then
+            pos = V3 and V3(KYUSEI_AT.X, KYUSEI_AT.Y, KYUSEI_AT.Z) or nil
+        end
+    end
+    if pos == nil then
+        local ok, terr = pcall(function() return tostring(Excel.GetRow("Aetheryte", ONOKORO).Territory) end)
+        if not ok or not string.find(terr, "(" .. RUBY_SEA .. ")", 1, true) then
+            error("Onokoro's aetheryte id looks wrong (" .. tostring(terr) .. "). Start next to Kyusei.")
+        end
+        Say("Teleporting to Onokoro.")   -- works mounted, flying included
+        Actions.Teleport(ONOKORO)
+        -- the territory doesn't change within the Ruby Sea: wait for the cast, then the load
+        local t = 0
+        while Free() and t < 5 do yield("/wait 0.2"); t = t + 0.2 end
+        Until(function() return Territory() == RUBY_SEA and Free() end, 60, "the teleport to Onokoro")
+        yield("/wait 1")
+        pos = Kyusei()
+        if pos == nil then error("Kyusei (Heaven-on-High entrance) not found after the teleport. Start next to her.") end
+    end
+    if Dist(pos) > MOUNT_FROM then
+        -- Long trip: fly close, then land on open ground in front of her (a flight aimed at her
+        -- stops above her, over the building behind her), dismount, and walk the last steps.
+        Travel(pos, 40)
+        local p, rot = Kyusei()
+        if p ~= nil then pos = p end
+        local land = pos
+        if rot ~= nil and V3 ~= nil then
+            local x, z = pos.X + 5 * math.sin(rot), pos.Z + 5 * math.cos(rot)
+            land = V3(x, pos.Y, z)
+            pcall(function()   -- on the mesh at her height, not a roof
+                local pt = IPC.vnavmesh.NearestPoint(land, 2, 1.5)
+                if pt ~= nil then land = pt end
+            end)
+        end
+        Travel(land, 1.5, true)
+        for _ = 1, 10 do   -- Dismount lands first when flying
+            if not Entity.Player.IsMounted then break end
+            Actions.ExecuteGeneralAction(23)
+            yield("/wait 1")
+        end
+        Until(Free, 10, "the player to be free")
+    end
+    -- short trips stay on the ground, mounted or not: talking to her dismounts
+    if Dist(pos) > 3 then Travel(pos, 3, false) end
+    if Dist(pos) > 6 then error("Couldn't get to Kyusei. Start next to her.") end
+end
+GoToKyusei()
+
 local lastRunStart, lastSearch = nil, 0
 for i = 1, MAX_RUNS do
     -- Sixth Sense: how long a floor takes apart from the search (enter, pomanders, leave, wait).
@@ -3547,9 +3651,8 @@ for i = 1, MAX_RUNS do
         if result == "taken" then LogI("Died after discovering the hoard (it still counts)") end
     end
     LogI(string.format("Run %d done, hoards taken: %d, missed: %d, sensed-not-found: %d, deaths: %d", i, hoards, missed, unseen, deaths))
-    local goal = SIXTH and "sixth" or "normal"
-    if (HC.stop and HOH_EARNED[goal]) or completed then
-        LogI("Earned " .. GOAL_ACHIEVEMENT[goal] .. ": stopping")
+    if completed then
+        LogI("Earned " .. HC.mine.last[3] .. ": stopping")
         break
     end
     Wait(3)

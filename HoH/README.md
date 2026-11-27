@@ -16,7 +16,8 @@ Farms Accursed Hoards in Heaven-on-High for the 10k / 20k / 30k and Of the Sixth
    ```
    https://github.com/HeyKupo/GetItDoneKupo/blob/main/HoH/HoH_hoard_macro.lua
    ```
-4. **Stand next to Kyusei and start the macro.** Any job is fine: it switches to your save's job (you need a gearset for it).
+4. **Start the macro.** Anywhere is fine: it teleports to Onokoro and flies to Kyusei if needed. Any job is fine too: it switches to your save's job (you need a gearset for it).
+5. *Optional:* make two game macros, `/snd run HoH` and `/snd stop HoH`, and put them on a hotbar to start and stop without opening SND. Use whatever you named the macro in SND.
 
 For **Of the Sixth Sense**, turn on **SixthSense** first.
 
