@@ -1,7 +1,7 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.4.1
+version: 1.4.2
 description: HoH hoard farm, loaded by the HoH_hoard macro (which SND downloads it for as a dependency). Enter on a save, use Intuition, take the hoard if it's on the floor, leave, repeat. Leaving doesn't change the save.
 [[End Metadata]]
 --]=====]
@@ -285,10 +285,23 @@ local function OpenSaveWindow()
     collectgarbage("collect")
     local npc = npcName and Entity.GetEntityByName(npcName) or nil
     if npc == nil then error("Kyusei (Heaven-on-High entrance) not found nearby. Start next to her.") end
-    npc:SetAsTarget()
-    npc:Interact()
-
-    WaitAddon("DeepDungeonMenu", 10)
+    -- Talk to her; if her menu doesn't open (out of reach, or the talk only dismounted us), walk
+    -- right up to her and try again.
+    for try = 1, 4 do
+        npc:SetAsTarget()
+        npc:Interact()
+        local t = 0
+        while not AddonReady("DeepDungeonMenu") and t < 3 do yield("/wait 0.2"); t = t + 0.2 end
+        if AddonReady("DeepDungeonMenu") then break end
+        if try == 4 then error("Kyusei's menu didn't open. Start next to her.") end
+        pcall(function()
+            IPC.vnavmesh.PathfindAndMoveTo(npc.Position, false)
+            local w = 0
+            yield("/wait 0.3")
+            while w < 4 and IPC.vnavmesh.IsRunning() do yield("/wait 0.2"); w = w + 0.2 end
+            IPC.vnavmesh.Stop()
+        end)
+    end
     yield(MENU_ENTER_CMD)
 
     WaitAddon("DeepDungeonSaveData", 10)
@@ -386,6 +399,11 @@ local USE_SAFETY        = true   -- always (no setting); skipped if the save has
 local SAFETY_USED = false   -- reset at the start of each run; Safety once per floor
 local STEALTH = false       -- true after Concealment: no abilities (dashes) or pomanders; Sprint is fine
 local PENDING_CONCEAL = nil -- Concealment command to use on the move, right after dash + Sprint
+-- NIN/ROG Hide, the last resort: a save with no Concealment and no magicite (normal mode) hides
+-- instead, at the same point on the move. Out of combat only, and you walk at half speed (Sprint
+-- still helps), so only when there's nothing else.
+local PENDING_HIDE = false
+local HIDE_ID = 2245
 local function UseSafety()
     if not USE_SAFETY or SAFETY_USED or STEALTH or DDX.PomCount(POM.safety) == 0 then return end
     SAFETY_USED = true
@@ -404,7 +422,13 @@ local function SafetyNow()
 end
 
 local function UseProtection()
-    if DDX.PomCount(POM.concealment) > 0 then PENDING_CONCEAL = PomCmd(POM.concealment) end
+    if DDX.PomCount(POM.concealment) > 0 then PENDING_CONCEAL = PomCmd(POM.concealment)
+    else
+        local job = Player.Job ~= nil and Player.Job.Id or 0
+        local mags = 0
+        pcall(function() mags = DDX.MagCount(0) + DDX.MagCount(1) + DDX.MagCount(2) end)
+        PENDING_HIDE = (job == 30 or job == 29) and mags == 0
+    end
     SafetyNow()
 end
 
@@ -822,13 +846,28 @@ local CONCEAL_MIN_DIST = 10   -- don't bother with Concealment if this close to 
 local POM_ANIM_SECONDS = 1.5  -- most of the pomander animation lock (~2.1s); Sprint is retried after it
 
 local function PomOnTheMove(hoard)
+    if PENDING_HIDE then
+        PENDING_HIDE = false
+        if hoard ~= nil and DistanceTo(hoard) < CONCEAL_MIN_DIST then
+            LogD(string.format("Hide skipped: %.0fy left", DistanceTo(hoard)))
+        elseif not STEALTH then
+            LogD("Protection: Hide (no Concealment or magicite)")
+            yield('/ac "' .. ActionName(HIDE_ID, "Hide") .. '"')
+            STEALTH = true
+            Wait(0.6)
+            return true
+        end
+        return false
+    end
     if PENDING_CONCEAL ~= nil and hoard ~= nil and DistanceTo(hoard) < CONCEAL_MIN_DIST then
         LogD(string.format("Concealment skipped: %.0fy left", DistanceTo(hoard)))
         PENDING_CONCEAL = nil
+    PENDING_HIDE = false
     elseif PENDING_CONCEAL ~= nil then
         LogD("Protection: Pomander of Concealment (on the move)")
         DDX.Use(PENDING_CONCEAL)
         PENDING_CONCEAL = nil
+    PENDING_HIDE = false
         STEALTH = true
         Wait(POM_ANIM_SECONDS)
         return true
@@ -922,7 +961,7 @@ local function SpeedUp(target, hoard)
     local function ConcealIfThreat()
         -- Sixth Sense holds its first Concealment itself: it hands over a check to run here too,
         -- so that one also goes on before any dash or Sprint.
-        if PENDING_CONCEAL == nil then return DDX.concealHook ~= nil and DDX.concealHook() or false end
+        if PENDING_CONCEAL == nil and not PENDING_HIDE then return DDX.concealHook ~= nil and DDX.concealHook() or false end
         local p = Entity.Player.Position
         local near, why = DDX.ThreatNear(p.X, p.Z, ENEMY_DASH_RADIUS)
         if not near then return false end
@@ -1782,6 +1821,7 @@ local function Attempt()
     SAFETY_USED = false
     STEALTH = false
     PENDING_CONCEAL = nil
+    PENDING_HIDE = false
     for k, v in pairs(lastDash) do   -- no clock: allow each dash once per run
         if v == true then lastDash[k] = nil end
     end
@@ -2649,6 +2689,7 @@ local function AttemptSixth()
     SAFETY_USED = false
     STEALTH = false
     PENDING_CONCEAL = nil
+    PENDING_HIDE = false
     floorMagicTried = {}
     for k, v in pairs(lastDash) do
         if v == true then lastDash[k] = nil end
@@ -2773,6 +2814,7 @@ local function AttemptSixth()
         return STEALTH
     end
     PENDING_CONCEAL = nil
+    PENDING_HIDE = false
     local hallwayDone = false   -- reached the first hallway (Concealment goes on while walking it)
     local inHallway = false     -- walking a hallway right now (passed its midpoint, not at the stop yet)
     HOH_DASH_CHECK = true       -- dashes check for enemies even with Concealment held back
@@ -3596,8 +3638,10 @@ local function GoToKyusei()
         local t = 0
         while Free() and t < 5 do yield("/wait 0.2"); t = t + 0.2 end
         Until(function() return Territory() == RUBY_SEA and Free() end, 60, "the teleport to Onokoro")
-        yield("/wait 1")
+        -- the zone is up before its NPCs are: wait for her to load in
+        local t2 = 0
         pos = Kyusei()
+        while pos == nil and t2 < 20 do yield("/wait 0.5"); t2 = t2 + 0.5; pos = Kyusei() end
         if pos == nil then error("Kyusei (Heaven-on-High entrance) not found after the teleport. Start next to her.") end
     end
     if Dist(pos) > MOUNT_FROM then
@@ -3623,8 +3667,19 @@ local function GoToKyusei()
         end
         Until(Free, 10, "the player to be free")
     end
-    -- short trips stay on the ground, mounted or not: talking to her dismounts
-    if Dist(pos) > 3 then Travel(pos, 3, false) end
+    -- Last steps, on the ground (mounted or not: talking to her dismounts), to a spot 2.5y in
+    -- front of her: aiming at her own position can end beside her, out of talking reach.
+    local p, rot = Kyusei()
+    if p ~= nil then pos = p end
+    local stand = pos
+    if rot ~= nil and V3 ~= nil then
+        stand = V3(pos.X + 2.5 * math.sin(rot), pos.Y, pos.Z + 2.5 * math.cos(rot))
+        pcall(function()
+            local pt = IPC.vnavmesh.NearestPoint(stand, 2, 1.5)
+            if pt ~= nil then stand = pt end
+        end)
+    end
+    if Dist(stand) > 1.5 then Travel(stand, 1, false) end
     if Dist(pos) > 6 then error("Couldn't get to Kyusei. Start next to her.") end
 end
 GoToKyusei()

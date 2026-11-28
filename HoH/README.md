@@ -12,12 +12,17 @@ Farms Accursed Hoards in Heaven-on-High for the 10k / 20k / 30k and Of the Sixth
    
 2. **Install** [SomethingNeedDoing](https://github.com/Jaksuhn/SomethingNeedDoing) (15.16 or later) and [vnavmesh](https://github.com/awgil/ffxiv_navmesh).
 
-3. **Add the macro.** In SND, click **New Macro**, set **Type** to **Lua**, paste this URL under **Import from Github**, and click **Create**:
-   ```
-   https://github.com/HeyKupo/GetItDoneKupo/blob/main/HoH/HoH_hoard_macro.lua
-   ```
+3. **Add the macro.** In SND:
+   1. Click **New Macro**
+   2. Set **Type** to **Lua**
+   3. Paste this URL under **Import from Github**: https://github.com/HeyKupo/GetItDoneKupo/blob/main/HoH/HoH_hoard_macro.lua
+   4. Click **Create**:
 4. **Start the macro.** Anywhere is fine: it teleports to Onokoro and flies to Kyusei if needed. Any job is fine too: it switches to your save's job (you need a gearset for it).
-5. *Optional:* make two game macros, `/snd run HoH` and `/snd stop HoH`, and put them on a hotbar to start and stop without opening SND. Use whatever you named the macro in SND.
+5. *Optional:* make two macros in game:
+   * `/snd run HoH`
+   * `/snd stop HoH`
+   
+Put them on a hotbar to start and stop without opening SND. Use whatever you named the macro in SND.
 
 For **Of the Sixth Sense**, turn on **SixthSense** first.
 
@@ -29,6 +34,7 @@ For **Of the Sixth Sense**, turn on **SixthSense** first.
 - Pomanders and magicites are used automatically: Concealment until something attacks, then magicite.
 - Chat shows your find rate and progress to the next achievement after every hoard, and a summary when you stop.
 - Stops by itself when you earn the achievements: For the Hoard VII (30,000 hoards) in normal mode, The Trouble with Buried II in Sixth Sense. Turn off **StopOnAchievement** to keep going.
+- For the Hoard VII is about 2.5 million yalms of running to hoards: some 1,250 trips across a zone, or 115 hours of nonstop jogging. Let the script wear out its boots instead of you.
 - Made for floor 11 saves. Other floors may work. YMMV.
 
 ## Settings
