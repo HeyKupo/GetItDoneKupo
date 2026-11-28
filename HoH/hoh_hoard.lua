@@ -1,7 +1,7 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.4.3
+version: 1.4.4
 description: HoH hoard farm, loaded by the HoH_hoard macro (which SND downloads it for as a dependency). Enter on a save, use Intuition, take the hoard if it's on the floor, leave, repeat. Leaving doesn't change the save.
 [[End Metadata]]
 --]=====]
@@ -308,6 +308,23 @@ local function OpenSaveWindow()
     yield("/wait 0.3")   -- let the slot values fill in
 end
 
+-- Pandora's Box Auto-Peloton fires Peloton on its own while you run, and any action breaks
+-- Concealment (it got a Sixth Sense run killed). On a job that has Peloton (physical ranged),
+-- switch it off for as long as the macro runs; OnStop switches it back on. Checked on every
+-- entry, after the job check, so a gearset change to such a job is covered. (BossModReborn's
+-- auto-Peloton has no such switch: the README says to turn it off.)
+local PELOTON = { paused = false, jobs = { [5] = true, [23] = true, [31] = true, [38] = true } }   -- ARC BRD MCH DNC
+local function PelotonGuard()
+    if PELOTON.paused or not PELOTON.jobs[Player.Job.Id] then return end
+    pcall(function()
+        if IPC.PandorasBox.GetFeatureEnabled("Auto-Peloton") == true then
+            IPC.PandorasBox.SetFeatureEnabled("Auto-Peloton", false)
+            PELOTON.paused = true
+            LogI("Pandora's Auto-Peloton switched off while the macro runs")
+        end
+    end)
+end
+
 local function EnterWithSave()
     if MENU_ENTER_CMD == nil or SAVE_SLOT_CMD == nil then
         error("Deep dungeon menu callbacks not filled in yet")
@@ -331,6 +348,7 @@ local function EnterWithSave()
         yield("/wait 1")
         OpenSaveWindow()
     end
+    PelotonGuard()
     yield(SAVE_SLOT_CMD)
 
     WaitAddon("ContentsFinderConfirm", 60)
@@ -3527,6 +3545,10 @@ end
 -- the end of the script for a macro without one.
 function HoH_OnStop()
     pcall(function() IPC.vnavmesh.Stop() end)   -- don't leave a walk or flight running
+    if PELOTON.paused then   -- switch Pandora's Auto-Peloton back on (see PelotonGuard)
+        PELOTON.paused = false
+        pcall(function() IPC.PandorasBox.SetFeatureEnabled("Auto-Peloton", true) end)
+    end
     if HC.reported then return end
     HC.reported = true
     local t = HC.Line()

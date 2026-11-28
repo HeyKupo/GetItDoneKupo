@@ -53,4 +53,5 @@ For **Of the Sixth Sense**, turn on **SixthSense** first.
 ## Good to know
 
 - **Updates** install themselves when SND starts, and keep your settings.
+- **Auto-Peloton breaks Concealment** (any action does). On a job with Peloton, the script switches off Pandora's Box Auto-Peloton while it runs and back on when it stops; turn off BossModReborn's auto-Peloton yourself.
 - **Client language:** any should work, but only English has been tested.
