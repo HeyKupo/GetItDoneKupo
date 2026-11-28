@@ -1,12 +1,12 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.4.2
+version: 1.4.3
 description: Farms Accursed Hoards in Heaven-on-High. https://github.com/HeyKupo/GetItDoneKupo/tree/main/HoH
 plugin_dependencies:
 - vnavmesh
 dependencies:
-- source: https://github.com/HeyKupo/GetItDoneKupo/blob/v1.4.2/HoH/hoh_hoard.lua
+- source: https://github.com/HeyKupo/GetItDoneKupo/blob/v1.4.3/HoH/hoh_hoard.lua
 configs:
   SaveSlot:
     default: 1

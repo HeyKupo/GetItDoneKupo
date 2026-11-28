@@ -1,7 +1,7 @@
 --[=====[
 [[SND Metadata]]
 author: HeyKupo
-version: 1.4.2
+version: 1.4.3
 description: HoH hoard farm, loaded by the HoH_hoard macro (which SND downloads it for as a dependency). Enter on a save, use Intuition, take the hoard if it's on the floor, leave, repeat. Leaving doesn't change the save.
 [[End Metadata]]
 --]=====]
@@ -3561,7 +3561,9 @@ end
 local function GoToKyusei()
     if InDeepDungeon() then return end
     local RUBY_SEA, ONOKORO, MOUNT_FROM, FLY_EXTRA = 613, 106, 30, 300   -- TerritoryType, Aetheryte, yalms, yalms
-    local KYUSEI_AT = { X = -2.0, Y = 3.0, Z = -611.4 }   -- where she stands, for when she isn't loaded
+    -- Where she stands and which way she faces (measured), for when she isn't loaded: right after
+    -- a teleport she sometimes isn't, even 20s later, with the aetheryte ~93y away.
+    local KYUSEI_AT = { X = -2.0, Y = 3.0, Z = -611.4, R = -0.07 }
     local function Kyusei()   -- her position and facing, or nil when she isn't loaded
         local pos, rot = nil, nil
         for obj in luanet.each(Svc.Objects) do
@@ -3638,10 +3640,12 @@ local function GoToKyusei()
         local t = 0
         while Free() and t < 5 do yield("/wait 0.2"); t = t + 0.2 end
         Until(function() return Territory() == RUBY_SEA and Free() end, 60, "the teleport to Onokoro")
-        -- the zone is up before its NPCs are: wait for her to load in
+        -- the zone is up before its NPCs are: give her a few seconds to load in; if she still
+        -- isn't there, head for where she stands (she loads in on the way)
         local t2 = 0
         pos = Kyusei()
-        while pos == nil and t2 < 20 do yield("/wait 0.5"); t2 = t2 + 0.5; pos = Kyusei() end
+        while pos == nil and t2 < 5 do yield("/wait 0.5"); t2 = t2 + 0.5; pos = Kyusei() end
+        if pos == nil and V3 ~= nil then pos = V3(KYUSEI_AT.X, KYUSEI_AT.Y, KYUSEI_AT.Z) end
         if pos == nil then error("Kyusei (Heaven-on-High entrance) not found after the teleport. Start next to her.") end
     end
     if Dist(pos) > MOUNT_FROM then
@@ -3649,7 +3653,7 @@ local function GoToKyusei()
         -- stops above her, over the building behind her), dismount, and walk the last steps.
         Travel(pos, 40)
         local p, rot = Kyusei()
-        if p ~= nil then pos = p end
+        if p ~= nil then pos = p else rot = KYUSEI_AT.R end
         local land = pos
         if rot ~= nil and V3 ~= nil then
             local x, z = pos.X + 5 * math.sin(rot), pos.Z + 5 * math.cos(rot)
@@ -3670,7 +3674,7 @@ local function GoToKyusei()
     -- Last steps, on the ground (mounted or not: talking to her dismounts), to a spot 2.5y in
     -- front of her: aiming at her own position can end beside her, out of talking reach.
     local p, rot = Kyusei()
-    if p ~= nil then pos = p end
+    if p ~= nil then pos = p else rot = KYUSEI_AT.R end
     local stand = pos
     if rot ~= nil and V3 ~= nil then
         stand = V3(pos.X + 2.5 * math.sin(rot), pos.Y, pos.Z + 2.5 * math.cos(rot))
